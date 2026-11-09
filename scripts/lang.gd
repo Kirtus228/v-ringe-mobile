@@ -65,6 +65,8 @@ const DICT := {
     "touch_guard": ["БЛОК держи пальцем, УКЛОН — короткий тап. II сверху — пауза.",
             "Hold BLOCK, tap DODGE. II at the top — pause."],
     "prefight_hint_touch": ["ТАП по «В БОЙ» — начать", "TAP «FIGHT» to start"],
+    "controls_hint_touch": ["Удары — слева внизу · стик — справа · БЛОК — держать · УКЛОН — тап",
+            "Punches bottom left · stick bottom right · hold BLOCK · tap DODGE"],
     "tour_locked": ["нужен пояс", "needs belt"],
     "tour_done": ["ВЗЯТ", "WON"],
     "tour_progress": ["бой", "fight"],

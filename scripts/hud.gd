@@ -396,7 +396,8 @@ func show_menu(d: Dictionary) -> void:
     _btn(Lang.t("tour") + "  G", Vector2(866, 586), Vector2(148, 46), "tour")
     _btn(Lang.t("story") + "  Y", Vector2(1020, 586), Vector2(148, 46), "story")
 
-    _overlay_label(Lang.t("controls_hint"), 0, 690, W, 11, Color(0.56, 0.61, 0.70),
+    var hint := Lang.t("controls_hint_touch") if bool(d.get("touch", false)) else Lang.t("controls_hint")
+    _overlay_label(hint, 0, 690, W, 11, Color(0.56, 0.61, 0.70),
             HORIZONTAL_ALIGNMENT_CENTER, false)
     if bool(d.get("saved", false)):
         _overlay_label("✓ " + Lang.t("saved"), 50, 545, 620, 11, Color(0.55, 0.86, 0.62),

@@ -951,7 +951,8 @@ func _menu_data() -> Dictionary:
             "saved": saved_flash > 0.0,
             "tour_active": tour_id, "tour_wins": tour_wins,
             "tour_name": String(_tournament_by_id(tour_id).get("name", "")),
-            "tour_done": tour_done.size(), "tour_total": TOURNAMENTS.size()}
+            "tour_done": tour_done.size(), "tour_total": TOURNAMENTS.size(),
+            "touch": touch_ui}
 
 
 func _result_data() -> Dictionary:
