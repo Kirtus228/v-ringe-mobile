@@ -1,0 +1,13 @@
+# Godot
+.godot/
+
+# сборки
+build/
+*.exe
+*.apk
+*.pck
+
+# служебное
+tools/android/
+*.zip
+.DS_Store
