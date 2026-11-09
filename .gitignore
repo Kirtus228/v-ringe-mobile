@@ -5,7 +5,6 @@
 build/
 *.exe
 *.apk
-*.pck
 
 # служебное
 tools/android/
