@@ -260,6 +260,10 @@ const FALL_TILT := 0.95
 enum KnockState { NONE, FALLING, DOWNED, GETUP }
 ## во время падения/лежания/подъёма удары не проходят
 @export var knockdown_invulnerable := true
+## сколько нажатий Space нужно, чтобы встать (одного нажатия мало — надо жать)
+@export var get_up_presses: int = 8
+## с какой скоростью «остывает» прогресс, если перестать жать (доля в секунду)
+@export var get_up_decay: float = 0.35
 ## сколько секунд тело лежит, прежде чем начнётся «downed» (таймер подъёма
 ## стартует именно с этого момента, а не с падения)
 @export var fall_hold := 0.9
@@ -269,6 +273,8 @@ var knock_state: int = KnockState.NONE
 var knock_t := 0.0
 ## сколько раз боец уже поднялся после нокдауна в этом бою
 var knockdown_count := 0
+## накопленный прогресс подъёма (0..1): растёт от нажатий, остывает без них
+var get_up_progress := 0.0
 ## поза лежа: поворот и смещение тела, снятые с ragdoll в момент «downed»
 var _down_quat := Quaternion.IDENTITY
 var _down_pos := Vector3.ZERO
@@ -790,6 +796,7 @@ func reset(spawn: Vector3, hp_value: float) -> void:
     knock_state = KnockState.NONE
     knock_t = 0.0
     knockdown_count = 0
+    get_up_progress = 0.0
     _down_quat = Quaternion.IDENTITY
     _down_pos = Vector3.ZERO
     wob_sh_l.clear()
@@ -1158,6 +1165,7 @@ func start_knockdown(impulse: Vector3 = Vector3.ZERO) -> bool:
     ko = false
     knock_state = KnockState.FALLING
     knock_t = 0.0
+    get_up_progress = 0.0
     fallen = true
     down_t = 0.0
     stun = maxf(stun, fall_hold + get_up_duration + 0.2)
@@ -1193,6 +1201,7 @@ func _ragdoll_settled() -> bool:
 func _enter_downed() -> void:
     knock_state = KnockState.DOWNED
     knock_t = 0.0
+    get_up_progress = 0.0
     var rb: RigidBody3D = ragdoll_parts.get("pelvis")
     if rb != null:
         var pelvis := rb.global_position
@@ -1220,12 +1229,30 @@ func begin_get_up() -> bool:
         return false
     knock_state = KnockState.GETUP
     knock_t = 0.0
+    get_up_progress = 0.0
     clear_ragdoll()
     _rig_reset()
     vel = Vector3.ZERO
     stun = maxf(stun, get_up_duration * 0.5)
     get_up_started.emit()
     return true
+
+
+## Одно «нажатие на подъём»: добавляет 1/N прогресса. Возвращает накопленное
+## значение; 1.0 — можно вставать. Вызывать только в состоянии DOWNED.
+func get_up_press() -> float:
+    if knock_state != KnockState.DOWNED:
+        return 0.0
+    get_up_progress = clampf(get_up_progress + 1.0 / maxf(float(get_up_presses), 1.0),
+            0.0, 1.0)
+    return get_up_progress
+
+
+## Остывание прогресса, если игрок перестал жать.
+func get_up_cool(dt: float) -> void:
+    if knock_state != KnockState.DOWNED:
+        return
+    get_up_progress = maxf(0.0, get_up_progress - get_up_decay * dt)
 
 
 func _finish_get_up() -> void:

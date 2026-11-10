@@ -48,6 +48,10 @@ var block := false
 var body_mode := false
 ## боец лежит: показываем кнопку «ВСТАТЬ» (на мобилке нет Space)
 var downed := false
+## прогресс активного подъёма: сколько нажатий уже набрано
+var mash_progress := 0.0
+var mash_done := 0
+var mash_need := 1
 
 var pad: Control
 var font: SystemFont
@@ -98,6 +102,17 @@ func set_downed(on: bool) -> void:
     downed = on
     if not on:
         _hot.erase("getup")
+        mash_progress = 0.0
+        mash_done = 0
+    if pad != null and active:
+        pad.queue_redraw()
+
+
+## Прогресс «расжатия» кнопки: заполняем круг по мере нажатий.
+func set_mash(progress: float, done: int, need: int) -> void:
+    mash_progress = clampf(progress, 0.0, 1.0)
+    mash_done = done
+    mash_need = maxi(need, 1)
     if pad != null and active:
         pad.queue_redraw()
 
@@ -268,16 +283,25 @@ func _draw_pad() -> void:
     pad.draw_arc(knob, KNOB_R, 0.0, TAU, 32, AMBER, 3.0, true)
 
 
-## Большая кнопка «ВСТАТЬ»: пульсирует, чтобы её было видно сразу.
+## Большая кнопка «ВСТАТЬ»: пульсирует и заполняется по мере нажатий.
 func _draw_getup() -> void:
     var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.006)
     var hot := bool(_hot.get("getup", false))
     pad.draw_circle(GETUP_POS, GETUP_R, Color(0.98, 0.75, 0.14, 0.30 + 0.22 * pulse))
     pad.draw_arc(GETUP_POS, GETUP_R, 0.0, TAU, 56, AMBER, 4.0, true)
-    pad.draw_arc(GETUP_POS, GETUP_R - 10.0, 0.0, TAU, 48,
+    # заполнение по кругу: видно, сколько ещё жать
+    if mash_progress > 0.001:
+        pad.draw_arc(GETUP_POS, GETUP_R - 5.0, -PI * 0.5, -PI * 0.5 + TAU * mash_progress,
+                56, Color(0.99, 0.90, 0.52), 7.0, true)
+    pad.draw_arc(GETUP_POS, GETUP_R - 12.0, 0.0, TAU, 48,
             Color(0.99, 0.90, 0.52, 0.75 if hot else 0.45 + 0.35 * pulse), 2.0, true)
     var label := "ВСТАТЬ"
     var size := 30
     var tw := font_b.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
     pad.draw_string(font_b, GETUP_POS + Vector2(-tw * 0.5, size * 0.36), label,
             HORIZONTAL_ALIGNMENT_LEFT, -1, size, TEXT)
+    if mash_need > 1:
+        var cnt := "%d/%d" % [mash_done, mash_need]
+        var cs := font_b.get_string_size(cnt, HORIZONTAL_ALIGNMENT_LEFT, -1, 20).x
+        pad.draw_string(font_b, GETUP_POS + Vector2(-cs * 0.5, 58), cnt,
+                HORIZONTAL_ALIGNMENT_LEFT, -1, 20, AMBER)

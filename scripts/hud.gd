@@ -28,6 +28,7 @@ var p_stam_fill: ColorRect
 var e_hp_fill: ColorRect
 var e_stam_fill: ColorRect
 var timer_lbl: Label
+var round_lbl: Label
 var score_lbl: Label
 var hs_lbl: Label
 var combo_lbl: Label
@@ -37,6 +38,10 @@ var chain_bg: ColorRect
 var knockdown_lbl: Label
 var getup_lbl: Label
 var getup_time_lbl: Label
+var mash_bg: ColorRect
+var mash_bar: ColorRect
+var mash_lbl: Label
+var rest_time_lbl: Label
 var training_lbl: Label
 var opp_lbl: Label
 
@@ -75,7 +80,7 @@ func build() -> void:
     e_hp_fill = _bar(936, 44, 300, 16, RED)
     e_stam_fill = _bar(936, 66, 300, 6, AMBER)
 
-    _label(Lang.t("round"), 540, 14, 200, 12, MUTED, HORIZONTAL_ALIGNMENT_CENTER, true)
+    round_lbl = _label(Lang.t("round"), 540, 14, 200, 12, MUTED, HORIZONTAL_ALIGNMENT_CENTER, true)
     timer_lbl = _label("1:30", 540, 30, 200, 40, TEXT, HORIZONTAL_ALIGNMENT_CENTER, true)
 
     _label(Lang.t("score"), 44, 636, 200, 12, MUTED, HORIZONTAL_ALIGNMENT_LEFT, true)
@@ -110,6 +115,24 @@ func build() -> void:
     getup_lbl.visible = false
     getup_time_lbl = _label("", 0, 278, W, 36, TEXT, HORIZONTAL_ALIGNMENT_CENTER, true)
     getup_time_lbl.visible = false
+
+    # прогресс «расжатия»: сколько нажатий Space уже есть
+    mash_bg = ColorRect.new()
+    mash_bg.position = Vector2(480, 340)
+    mash_bg.size = Vector2(320, 10)
+    mash_bg.color = Color(1, 1, 1, 0.14)
+    mash_bg.visible = false
+    mash_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    battle.add_child(mash_bg)
+    mash_bar = ColorRect.new()
+    mash_bar.position = Vector2(480, 340)
+    mash_bar.size = Vector2(0, 10)
+    mash_bar.color = AMBER
+    mash_bar.visible = false
+    mash_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    battle.add_child(mash_bar)
+    mash_lbl = _label("", 0, 352, W, 16, AMBER, HORIZONTAL_ALIGNMENT_CENTER, true)
+    mash_lbl.visible = false
 
     training_lbl = _label(Lang.t("training_hud") + " · " + Lang.t("form").to_upper() + " 0 · "
             + Lang.t("exit_hint"), 0, 540, W, 20, AMBER,
@@ -215,8 +238,24 @@ func set_downed(active: bool, hint: String = "") -> void:
     getup_time_lbl.visible = active
     if active and hint != "":
         getup_lbl.text = hint
-    if not active and getup_time_lbl:
-        getup_time_lbl.text = ""
+    if not active:
+        if getup_time_lbl:
+            getup_time_lbl.text = ""
+        set_mash(false, 0.0, 0, 1)
+
+
+## Прогресс активного подъёма: полоска и счётчик нажатий.
+func set_mash(active: bool, progress: float, done: int = 0, need: int = 1) -> void:
+    if mash_bg == null:
+        return
+    mash_bg.visible = active
+    mash_bar.visible = active
+    mash_lbl.visible = active
+    if not active:
+        return
+    mash_bar.size.x = 320.0 * clampf(progress, 0.0, 1.0)
+    mash_lbl.text = "%s  %d/%d" % [Lang.t("get_up_mash"), done, need]
+    mash_lbl.add_theme_color_override("font_color", AMBER if progress < 1.0 else ACCENT)
 
 
 ## Текст вида «Встать: 7.3 с»; последние 3 секунды — красным.
@@ -232,10 +271,15 @@ func set_opponent_name(name: String) -> void:
     opp_lbl.text = name if name != "" else Lang.t("opponent")
 
 
-func set_timer(seconds: float) -> void:
+func set_timer(seconds: float, rnd: int = 0, total: int = 0) -> void:
     var s := maxi(0, ceili(seconds))
     timer_lbl.text = "%d:%02d" % [int(s / 60), s % 60]
     timer_lbl.add_theme_color_override("font_color", RED if seconds <= 10.0 else TEXT)
+    if round_lbl:
+        if total > 1:
+            round_lbl.text = "%s %d/%d" % [Lang.t("round"), rnd, total]
+        else:
+            round_lbl.text = Lang.t("round")
 
 
 func set_score(value: int, combo: int, high: int) -> void:
@@ -696,13 +740,13 @@ func show_howto(d: Dictionary) -> void:
                 88, 318, 520, 11, Color(0.70, 0.75, 0.84), HORIZONTAL_ALIGNMENT_LEFT, false)
 
     _overlay_rect(656, 104, 560, 232, Color(0.02, 0.03, 0.05, 0.86))
-    var y := 122.0
+    var y := 120.0
     for line in [Lang.t("howto_move"), Lang.t("howto_punch"), Lang.t("howto_body"),
-            Lang.t("howto_knockdown"), Lang.t("howto_rope"), Lang.t("howto_career"),
-            Lang.t("howto_form")]:
+            Lang.t("howto_knockdown"), Lang.t("howto_rounds"), Lang.t("howto_rope"),
+            Lang.t("howto_career"), Lang.t("howto_form")]:
         _overlay_label("•  " + line, 680, y, 520, 13, Color(0.84, 0.88, 0.95),
                 HORIZONTAL_ALIGNMENT_LEFT, false)
-        y += 31.0
+        y += 26.0
 
     _btn(Lang.t("back"), Vector2(540, 372), Vector2(200, 48), "back")
     _overlay_label(Lang.t("howto_back"), 0, 436, W, 12, MUTED)
@@ -713,6 +757,26 @@ func show_ko(text: String) -> void:
     var l := _overlay_label(text, 0, 250, W, 84 if text.length() <= 4 else 64, AMBER)
     l.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
     l.add_theme_constant_override("shadow_offset_y", 4)
+
+
+## Перерыв между раундами: следующий раунд, отсчёт отдыха и кнопка «продолжить».
+func show_rest(d: Dictionary) -> void:
+    _clear_overlay()
+    _dim()
+    _overlay_label(Lang.t("rest"), 0, 90, W, 54, AMBER)
+    _overlay_label("%s %d/%d" % [Lang.t("rest_next"), int(d.get("round", 2)),
+            int(d.get("total", 1))], 0, 158, W, 24, TEXT)
+    rest_time_lbl = _overlay_label("", 0, 206, W, 66, TEXT)
+    _overlay_label(Lang.t("rest_hint"), 0, 300, W, 14, MUTED, HORIZONTAL_ALIGNMENT_CENTER, false)
+    _btn(Lang.t("rest_skip"), Vector2(520, 348), Vector2(240, 50), "skiprest")
+
+
+func set_rest_time(seconds: float) -> void:
+    if rest_time_lbl == null:
+        return
+    var s := maxi(0, ceili(seconds))
+    rest_time_lbl.text = "%d:%02d" % [int(s / 60), s % 60]
+    rest_time_lbl.add_theme_color_override("font_color", RED if seconds <= 5.0 else TEXT)
 
 
 func show_result(d: Dictionary) -> void:

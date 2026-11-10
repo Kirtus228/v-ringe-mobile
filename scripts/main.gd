@@ -12,7 +12,7 @@ const TouchScript = preload("res://scripts/touch.gd")
 const Lang = preload("res://scripts/lang.gd")
 
 enum St { MENU, FIGHT, KO, RESULT, PAUSE, CUSTOM, SETTINGS, UPGRADE, TRAINING, HOWTO,
-        PREFIGHT, TOUR, STORY }
+        PREFIGHT, TOUR, STORY, REST }
 
 ## Карьера: шесть поясов по десять соперников, каждый пояс — уровень сложности.
 const BELTS := [
@@ -353,6 +353,28 @@ enum TimeoutAction { DEFEAT, AUTO_GET_UP }
 ## соперник встаёт сам; задержка его подъёма (у игрока — свой таймер и Space)
 @export var enemy_get_up_delay: float = 2.0
 
+## --- раунды. Бой не заканчивается после первого раунда: между раундами
+## перерыв, дальше следующий раунд. Сколько раундов — зависит от сложности
+## (пояса): дебют 1, любитель 2, профи/мастер 3, элита 4, экстрапрофи 5.
+const ROUNDS_BY_BELT := [1, 2, 3, 3, 4, 5]
+## перерыв между раундами, секунд (можно пропустить Enter/Space/тапом)
+@export var rest_time: float = 30.0
+## сколько HP возвращается в углу между раундами (доля максимума)
+@export var corner_heal: float = 0.10
+var round_num := 1
+var rounds_total := 1
+var rest_left := 0.0
+var rounds_won_p := 0
+var rounds_won_e := 0
+## отладочные переопределения: --rounds=N и --rest=N
+var rounds_override := 0
+var rest_override := -1.0
+## «расжатие» подъёма: короткая пауза после нажатия, потом прогресс остывает
+var mash_grace := 0.0
+var _auto_mash_t := 0.0
+## пауза нажата во время перерыва между раундами — вернуться надо в перерыв
+var paused_from_rest := false
+
 ## Таймер подъёма: создаётся в _ready, стартует только в состоянии «downed».
 var get_up_timer: Timer
 ## кто сейчас лежит и ждёт подъёма
@@ -422,6 +444,8 @@ var touch_test := false
 var knock_test := false
 ## раскадровка нокдауна: --knockshot=<префикс> сохраняет кадры падения/подъёма
 var knock_shot := ""
+## автотест раундов и перерывов
+var round_test := false
 
 var ai := {"state": "wait", "t": 0.8, "pending": "jab"}
 var player_move := Vector3.ZERO
@@ -545,6 +569,9 @@ func _ready() -> void:
         for i in steps:
             if state == St.FIGHT:
                 _tick_fight(1.0 / 60.0)
+            elif state == St.REST:
+                # в прогоне перерывы не ждём — сразу следующий раунд
+                _next_round()
 
     if selftest:
         _run_selftest()
@@ -580,6 +607,8 @@ func _ready() -> void:
         _run_touchtest()
     if knock_test:
         _run_knocktest()
+    if round_test:
+        _run_roundtest()
     if knock_shot != "":
         _run_knockshot()
 
@@ -815,6 +844,12 @@ func _parse_args() -> void:
             get_up_time_limit = maxf(0.5, float(a.substr(8)))
         elif a.begins_with("--timeout="):
             on_timeout = TimeoutAction.AUTO_GET_UP if a.substr(10) == "auto" else TimeoutAction.DEFEAT
+        elif a.begins_with("--rounds="):
+            rounds_override = maxi(1, int(a.substr(9)))
+        elif a.begins_with("--rest="):
+            rest_override = maxf(0.0, float(a.substr(7)))
+        elif a == "--roundtest":
+            round_test = true
 
 
 # ---------------------------------------------------------------- сцена
@@ -1408,9 +1443,12 @@ func _on_hud_button(id: String) -> void:
                 _close_howto()
         "exit":
             _quit_game()
+        "skiprest":
+            if state == St.REST:
+                _next_round()
         "resume":
             if state == St.PAUSE:
-                _set_state(St.FIGHT)
+                _set_state(St.REST if paused_from_rest else St.FIGHT)
         "tomenu":
             if state == St.PAUSE or state == St.RESULT or state == St.TRAINING:
                 _leave_to_menu()
@@ -1568,6 +1606,14 @@ func _set_lang(code: String) -> void:
 # ---------------------------------------------------------------- состояние
 
 func _reset_fight() -> void:
+    rounds_total = _rounds_for_fight()
+    round_num = 1
+    rest_left = 0.0
+    rounds_won_p = 0
+    rounds_won_e = 0
+    paused_from_rest = false
+    mash_grace = 0.0
+    _auto_mash_t = 0.0
     timer = ROUND_TIME
     score = 0
     combo = 0
@@ -1628,6 +1674,12 @@ func _apply_forced_state() -> void:
             _apply_pose()
     elif autoplay or forced_state == "fight":
         _start_fight()
+    elif forced_state == "rest":
+        # кадр перерыва между раундами
+        _start_fight()
+        rounds_total = maxi(rounds_total, 2)
+        timer = 0.0
+        _end_round()
     elif forced_state == "menu":
         _set_state(St.MENU)
     elif forced_state == "locker":
@@ -1825,6 +1877,12 @@ func _set_state(s: int) -> void:
             hud.show_story(_story_data())
             sfx.music_volume(-20.0)
             sfx.music_pause(false)
+        St.REST:
+            hud.set_battle_visible(false)
+            hud.show_rest(_rest_data())
+            hud.set_rest_time(rest_left)
+            sfx.music_volume(-18.0)
+            sfx.music_pause(false)
 
 
 func _start_or_restart() -> void:
@@ -1863,6 +1921,8 @@ func _process(delta: float) -> void:
     match state:
         St.FIGHT, St.TRAINING:
             _tick_fight(delta)
+        St.REST:
+            _tick_rest(delta)
         St.KO:
             _tick_ko(delta)
         St.CUSTOM:
@@ -1877,7 +1937,7 @@ func _process(delta: float) -> void:
             enemy.tick(delta)
 
     if state != St.CUSTOM and state != St.SETTINGS and state != St.UPGRADE \
-            and state != St.PREFIGHT and state != St.TOUR:
+            and state != St.PREFIGHT and state != St.TOUR and state != St.REST:
         _update_hud()
     _update_camera(delta)
     _check_shot()
@@ -2082,6 +2142,9 @@ func _tick_fight(delta: float) -> void:
         # поражение (или победа, если лежит соперник), а не решение по очкам
         if downed_active:
             _end_fight("lose" if downed_who == player else "win", true)
+        elif round_num < rounds_total:
+            # раунд кончился, но бой нет — перерыв и следующий раунд
+            _end_round()
         else:
             _end_by_time()
 
@@ -2213,6 +2276,17 @@ func _tick_ko(delta: float) -> void:
     enemy.tick(delta * 0.5)
     if ko_timer <= 0.0:
         _finalize()
+
+
+## Перерыв между раундами: бойцы отдыхают, идёт отсчёт, можно пропустить.
+func _tick_rest(delta: float) -> void:
+    player.tick(delta)
+    enemy.tick(delta)
+    rest_left = maxf(0.0, rest_left - delta)
+    hud.set_rest_time(rest_left)
+    _update_hud()
+    if rest_left <= 0.0:
+        _next_round()
 
 
 # ---------------------------------------------------------------- ввод и ИИ
@@ -2502,6 +2576,15 @@ func _unhandled_input(event: InputEvent) -> void:
         if state == St.UPGRADE:
             _upgrade_key(event.keycode)
             return
+        if state == St.REST:
+            # перерыв: можно пропустить и сразу выйти на раунд
+            match event.keycode:
+                KEY_ENTER, KEY_SPACE, KEY_R:
+                    _next_round()
+                KEY_ESCAPE, KEY_P:
+                    paused_from_rest = true
+                    _set_state(St.PAUSE)
+            return
         match event.keycode:
             KEY_ENTER, KEY_SPACE, KEY_R:
                 if state == St.MENU or state == St.RESULT:
@@ -2541,7 +2624,7 @@ func _unhandled_input(event: InputEvent) -> void:
                 elif state == St.TRAINING:
                     _close_training()
                 elif state == St.PAUSE:
-                    _set_state(St.FIGHT)
+                    _set_state(St.REST if paused_from_rest else St.FIGHT)
                 elif state == St.RESULT:
                     _leave_to_menu()
             _:
@@ -2599,10 +2682,10 @@ func _on_touch_pause() -> void:
         _set_state(St.FIGHT)
 
 
-## «ВСТАТЬ» на мобилке: та же ветка, что Space на клавиатуре.
+## «ВСТАТЬ» на мобилке: каждое нажатие добавляет прогресс, как Space.
 func _on_touch_getup() -> void:
     if downed_active and downed_who == player:
-        _start_get_up(player)
+        _mash_get_up()
 
 
 # ---------------------------------------------------------------- управление
@@ -2914,10 +2997,15 @@ func _on_downed(who: Node3D) -> void:
         get_up_remaining = maxf(get_up_time_limit, 0.1)
         get_up_timer.wait_time = get_up_remaining
         get_up_timer.start()
+        mash_grace = 0.0
+        _auto_mash_t = 0.0
         hud.set_downed(true, Lang.t("get_up_hint_touch") if touch_ui else Lang.t("get_up_hint"))
         hud.set_downed_time(get_up_remaining)
         if touch_ui and touch != null:
             touch.set_downed(true)
+            touch.set_mash(0.0, 0, int(who.get_up_presses))
+        else:
+            hud.set_mash(true, 0.0, 0, int(who.get_up_presses))
         sfx.play("gasp", 1.05, -10.0)
     else:
         # соперник поднимается сам: у него нет кнопки, но есть своя задержка
@@ -2935,15 +3023,37 @@ func _on_get_up_timer_timeout() -> void:
 func _tick_knockdown(delta: float) -> void:
     if not downed_active or downed_who == null:
         return
-    # 1. Space поднимает только из «downed» (во время падения кнопка молчит).
-    # Проверяем ДО обработки таймаута — приоритет у подъёма.
-    if downed_who == player and Input.is_action_just_pressed("get_up"):
-        _start_get_up(player)
-        return
-    # автопилот/демо-бой встаёт сам: иначе любой бой кончался бы таймаутом
-    if downed_who == player and autoplay:
-        _start_get_up(player)
-        return
+    # 1. Space не поднимает сразу: каждое нажатие добавляет 1/N прогресса,
+    # без нажатий прогресс остывает. Проверяем ДО таймаута — приоритет у подъёма.
+    if downed_who == player:
+        if Input.is_action_just_pressed("get_up"):
+            _mash_get_up()
+            if not downed_active or downed_who == null:
+                return
+        # автопилот/демо-бой «жмёт» сам, иначе любой бой кончался бы таймаутом
+        if autoplay:
+            _auto_mash_t += delta
+            if _auto_mash_t >= 0.16:
+                _auto_mash_t = 0.0
+                _mash_get_up()
+                if not downed_active or downed_who == null:
+                    return
+        if downed_who == null:
+            return
+        # остывание прогресса: короткая пауза после нажатия, потом вниз
+        if mash_grace > 0.0:
+            mash_grace = maxf(0.0, mash_grace - delta)
+        else:
+            downed_who.get_up_cool(delta)
+        # на телефоне прогресс показываем на самой кнопке, а не полоской Space
+        if touch_ui and touch != null:
+            touch.set_mash(float(downed_who.get_up_progress),
+                    int(round(float(downed_who.get_up_progress) * float(downed_who.get_up_presses))),
+                    int(downed_who.get_up_presses))
+        else:
+            hud.set_mash(true, float(downed_who.get_up_progress),
+                    int(round(float(downed_who.get_up_progress) * float(downed_who.get_up_presses))),
+                    int(downed_who.get_up_presses))
     # 2. таймер истёк
     if get_up_timeout_pending or (downed_who == player and get_up_timer.time_left <= 0.0):
         _on_get_up_deadline()
@@ -2957,6 +3067,17 @@ func _tick_knockdown(delta: float) -> void:
     # 3. отсчёт на экране
     get_up_remaining = get_up_timer.time_left
     hud.set_downed_time(get_up_remaining)
+
+
+## Одно нажатие «встать»: копит прогресс; когда набрано — начинается подъём.
+func _mash_get_up() -> void:
+    var who: Node3D = downed_who
+    if who == null or who != player:
+        return
+    mash_grace = 0.55
+    var p: float = who.get_up_press()
+    if p >= 0.999:
+        _start_get_up(player)
 
 
 ## Подъём: таймер стоп, подсказка убрана, дальше играет анимация get_up.
@@ -3188,12 +3309,89 @@ func _end_fight(kind: String, by_ko: bool) -> void:
 
 
 func _end_by_time() -> void:
+    # решение по очкам: сначала выигранные раунды, при равенстве — здоровье
     var kind := "draw"
-    if player.hp > enemy.hp:
+    if rounds_won_p > rounds_won_e:
+        kind = "timewin"
+    elif rounds_won_p < rounds_won_e:
+        kind = "timelose"
+    elif player.hp > enemy.hp:
         kind = "timewin"
     elif player.hp < enemy.hp:
         kind = "timelose"
     _end_fight(kind, false)
+
+
+## Сколько раундов в этом бою: зависит от пояса (сложности), для тренировки — 1.
+func _rounds_for_fight() -> int:
+    if rounds_override > 0:
+        return rounds_override
+    if training:
+        return 1
+    return int(ROUNDS_BY_BELT[clampi(belt, 0, ROUNDS_BY_BELT.size() - 1)])
+
+
+## Конец раунда, но не боя: считаем раунд и уходим в перерыв.
+func _end_round() -> void:
+    if player.hp > enemy.hp:
+        rounds_won_p += 1
+    elif enemy.hp > player.hp:
+        rounds_won_e += 1
+    combo = 0
+    comboTimer = 0.0
+    chain = 0
+    chain_t = 0.0
+    punch_buf = ""
+    punch_buf_body = false
+    punch_buf_t = 0.0
+    player.blocking = false
+    enemy.blocking = false
+    player.punch_kind = ""
+    enemy.punch_kind = ""
+    player.telegraph = false
+    enemy.telegraph = false
+    ai = {"state": "wait", "t": 0.8, "pending": "jab", "combo": 0, "counter_ok": false}
+    rest_left = maxf(rest_time if rest_override < 0.0 else rest_override, 0.0)
+    print("ROUND конец ", round_num, "/", rounds_total, " счёт ", rounds_won_p, ":",
+            rounds_won_e, " hp=", int(player.hp), "/", int(enemy.hp))
+    sfx.play("bell", 1.0, -8.0)
+    if rest_left <= 0.0:
+        _next_round()
+        return
+    _set_state(St.REST)
+
+
+## Перерыв кончился (или его пропустили): снова на ринг, следующий раунд.
+func _next_round() -> void:
+    round_num += 1
+    paused_from_rest = false
+    timer = ROUND_TIME
+    rest_left = 0.0
+    combo = 0
+    comboTimer = 0.0
+    chain = 0
+    chain_t = 0.0
+    punch_buf = ""
+    punch_buf_body = false
+    punch_buf_t = 0.0
+    # угол: выносливость полностью, немного здоровья, стойка и ИИ в норме
+    player.stamina = player.max_stamina
+    enemy.stamina = enemy.max_stamina
+    player.hp = minf(player.max_hp, player.hp + player.max_hp * corner_heal)
+    enemy.hp = minf(enemy.max_hp, enemy.hp + enemy.max_hp * corner_heal)
+    player.stun = 0.0
+    enemy.stun = 0.0
+    player.blocking = false
+    enemy.blocking = false
+    ai = {"state": "wait", "t": 0.8, "pending": "jab", "combo": 0, "counter_ok": false}
+    print("ROUND старт ", round_num, "/", rounds_total, " hp=", int(player.hp), "/",
+            int(enemy.hp))
+    _set_state(St.FIGHT)
+    sfx.play("bell", 1.0, -6.0)
+
+
+func _rest_data() -> Dictionary:
+    return {"round": round_num + 1, "total": rounds_total, "time": rest_left}
 
 
 ## Списание очков за поражение. Вызывается из _finalize один раз за бой;
@@ -3498,7 +3696,7 @@ func _update_camera(delta: float) -> void:
 func _update_hud() -> void:
     hud.set_stats(player.hp / player.max_hp, player.stamina / player.max_stamina,
             enemy.hp / enemy.max_hp, enemy.stamina / enemy.max_stamina)
-    hud.set_timer(timer)
+    hud.set_timer(timer, round_num, rounds_total)
     hud.set_score(score, combo, high_score)
     hud.set_chain(chain, chain_t)
 
@@ -4442,8 +4640,11 @@ func _run_balancetest() -> void:
                 _start_fight()
                 timer = ROUND_TIME
                 var guard := 0
-                while state == St.FIGHT and guard < 12000:
-                    _tick_fight(1.0 / 30.0)
+                while (state == St.FIGHT or state == St.REST) and guard < 40000:
+                    if state == St.REST:
+                        _next_round()
+                    else:
+                        _tick_fight(1.0 / 30.0)
                     guard += 1
                 var won: bool = pending == "win" or pending == "ringout" or pending == "timewin"
                 print("BALANCE бой: пояс=", b + 1, " стиль=", String(_opp_style().get("ru", "")),
@@ -5106,6 +5307,14 @@ func _knock_press_space() -> void:
     await get_tree().process_frame
 
 
+## Несколько нажатий подряд (активный «расжим» подъёма).
+func _knock_mash(times: int) -> void:
+    for i in maxi(times, 1):
+        if int(player.knock_state) != FighterScript.KnockState.DOWNED:
+            return
+        await _knock_press_space()
+
+
 ## Уронить соперника: HP = 1 → удар игрока → нокдаун.
 func _knock_down_enemy() -> bool:
     if enemy.fallen or enemy.ko:
@@ -5185,8 +5394,16 @@ func _run_knocktest() -> void:
     lines.append("downed: через %.2f с, таймер_идёт=%s, подсказка=«%s», отсчёт=«%s»"
             % [t_down, timer_runs, hint, countdown])
 
-    # 3. Space: таймер стоп, подъём, HP = 50 %, счётчик = 1, управление вернулось
+    # 3. Одно нажатие НЕ поднимает: нужен активный «расжим» подъёма
     await _knock_press_space()
+    var need: int = int(player.get_up_presses)
+    var one_press_no_rise: bool = int(player.knock_state) == FighterScript.KnockState.DOWNED
+    var prog1: float = player.get_up_progress
+    # без нажатий прогресс остывает — успеть можно не всегда
+    await _knock_advance_real(1.3)
+    var prog_cooled: float = player.get_up_progress
+    var decay_ok: bool = prog_cooled < prog1
+    await _knock_mash(need + 4)
     var getup_started: bool = int(player.knock_state) == FighterScript.KnockState.GETUP
     var timer_stopped: bool = get_up_timer.is_stopped()
     var t_up := _knock_wait_player(FighterScript.KnockState.NONE, 3.0)
@@ -5194,12 +5411,15 @@ func _run_knocktest() -> void:
     var cnt1: int = int(player.knockdown_count)
     var control_back: bool = player.start_punch("jab")
     player.punch_kind = ""
-    ok = ok and getup_started and timer_stopped and t_up >= 0.0 \
+    ok = ok and one_press_no_rise and decay_ok and getup_started and timer_stopped \
+            and t_up >= 0.0 \
             and absf(hp1 - player.max_hp * float(restore_ratios[0])) < 0.6 \
             and cnt1 == 1 and control_back
-    lines.append("подъём: старт=%s (за %.2f с), таймер_стоп=%s, HP=%.0f (ждали %.0f), счётчик=%d, управление=%s"
-            % [getup_started, t_up, timer_stopped, hp1,
-                player.max_hp * float(restore_ratios[0]), cnt1, control_back])
+    lines.append("расжим: 1 нажатие не поднимает=%s (прогресс %.2f из 1.0), без нажатий %.2f→%.2f, после %d нажатий подъём=%s, таймер_стоп=%s, HP=%.0f, счётчик=%d, управление=%s"
+            % [one_press_no_rise, prog1, prog1, prog_cooled, need + 4, getup_started,
+                timer_stopped, hp1, cnt1, control_back])
+    lines.append("подъём: за %.2f с, HP=%.0f (ждали %.0f)"
+            % [t_up, hp1, player.max_hp * float(restore_ratios[0])])
 
     # 4. Второй и третий нокдаун: доля восстановления падает 50 → 35 → 20 %
     var hp2 := 0.0
@@ -5207,7 +5427,7 @@ func _run_knocktest() -> void:
     for n in [1, 2]:
         _knock_down_player()
         _knock_wait_player(FighterScript.KnockState.DOWNED, 3.0)
-        await _knock_press_space()
+        await _knock_mash(int(player.get_up_presses) + 4)
         _knock_wait_player(FighterScript.KnockState.NONE, 3.0)
         if n == 1:
             hp2 = player.hp
@@ -5272,12 +5492,15 @@ func _run_knocktest() -> void:
 
     # 8. Гонка ввода и таймаута в одном кадре: приоритет у подъёма
     on_timeout = TimeoutAction.DEFEAT
-    get_up_time_limit = 0.6
+    get_up_time_limit = 3.0
     _start_fight()
     no_ai = true
     _knock_down_player()
     _knock_wait_player(FighterScript.KnockState.DOWNED, 3.0)
     _knock_advance(0.45)
+    # почти дожали: одного нажатия не хватает, но последнее в этом же кадре
+    # приходит вместе с «выстрелившим» таймером
+    await _knock_mash(maxi(int(player.get_up_presses) - 1, 1))
     _on_get_up_timer_timeout()          # таймер «выстрелил» в этом же кадре
     await _knock_press_space()          # но игрок успел нажать Space
     var race_ok: bool = int(player.knock_state) == FighterScript.KnockState.GETUP \
@@ -5336,6 +5559,107 @@ func _run_knocktest() -> void:
     get_tree().quit()
 
 
+## Раунды: количество по поясам, конец раунда → перерыв → следующий раунд,
+## пропуск перерыва, решение по выигранным раундам.
+func _run_roundtest() -> void:
+    no_cash = true
+    demo = false
+    training = false
+    var ok := true
+    var lines: Array = []
+
+    # 1. раунды зависят от сложности (пояса)
+    var expect := [1, 2, 3, 3, 4, 5]
+    var counts: Array = []
+    rounds_override = 0
+    for b in BELTS.size():
+        belt = b
+        counts.append(_rounds_for_fight())
+    var belt_ok: bool = str(counts) == str(expect)
+    ok = ok and belt_ok
+    lines.append("раунды по поясам: %s (ждали %s)" % [str(counts), str(expect)])
+
+    # 2. финал первого раунда — перерыв, а не результат
+    belt = 2
+    rounds_override = 3
+    _start_fight()
+    no_ai = true
+    var rt: int = rounds_total
+    timer = 0.02
+    _tick_fight(0.05)
+    var rest_ok: bool = state == St.REST and round_num == 1 and rest_left > 0.0
+    var rest_ui: bool = hud.rest_time_lbl != null and hud.rest_time_lbl.text != ""
+    lines.append("конец раунда: всего=%d, состояние_перерыв=%s, раунд=%d, отдых=%.1f с, UI=%s"
+            % [rt, state == St.REST, round_num, rest_left, rest_ui])
+    ok = ok and rest_ok and rest_ui
+
+    # 3. перерыв пропускается Space (через тот же _unhandled_input)
+    var ev := InputEventKey.new()
+    ev.keycode = KEY_SPACE
+    ev.pressed = true
+    _unhandled_input(ev)
+    var next_ok: bool = state == St.FIGHT and round_num == 2 \
+            and is_equal_approx(timer, ROUND_TIME)
+    lines.append("пропуск перерыва: раунд=%d, таймер=%.0f, состояние_бой=%s"
+            % [round_num, timer, state == St.FIGHT])
+    ok = ok and next_ok
+
+    # 4. таймер перерыва доходит до нуля сам — раунд начинается без нажатия
+    timer = 0.02
+    _tick_fight(0.05)
+    var rest2: bool = state == St.REST
+    rest_left = 0.01
+    _tick_rest(0.05)
+    var auto_next: bool = state == St.FIGHT and round_num == 3
+    lines.append("отдых сам кончился: был_перерыв=%s, раунд=%d, бой=%s"
+            % [rest2, round_num, state == St.FIGHT])
+    ok = ok and rest2 and auto_next
+
+    # 5. последний раунд — решение по выигранным раундам
+    rounds_won_p = 2
+    rounds_won_e = 1
+    timer = 0.02
+    _tick_fight(0.05)
+    var final_ok: bool = state == St.KO and pending == "timewin"
+    lines.append("последний раунд: итог=«%s», КО-экран=%s, счёт раундов=%d:%d"
+            % [pending, state == St.KO, rounds_won_p, rounds_won_e])
+    ok = ok and final_ok
+
+    # 6. пауза в перерыве возвращает в перерыв, а не в бой
+    belt = 2
+    rounds_override = 3
+    _start_fight()
+    no_ai = true
+    timer = 0.02
+    _tick_fight(0.05)
+    paused_from_rest = true
+    _set_state(St.PAUSE)
+    _set_state(St.REST if paused_from_rest else St.FIGHT)
+    var pause_ok: bool = state == St.REST
+    lines.append("пауза в перерыве: вернулись в перерыв=%s" % pause_ok)
+    ok = ok and pause_ok
+
+    # 7. КО в первом раунде заканчивает бой сразу, без перерыва
+    rounds_override = 3
+    _start_fight()
+    no_ai = true
+    player.hp = 1.0
+    enemy.hp = 1.0
+    enemy.ko = true
+    _end_fight("win", true)
+    var ko_ok: bool = state == St.KO and round_num == 1 and rest_left <= 0.0
+    lines.append("КО в первом раунде: экран=%s, раунд=%d, перерыва_нет=%s"
+            % [state == St.KO, round_num, rest_left <= 0.0])
+    ok = ok and ko_ok
+
+    rounds_override = 0
+    training = false
+    for l in lines:
+        print("ROUNDTEST ", l)
+    print("ROUNDTEST ок=", ok)
+    get_tree().quit()
+
+
 ## Раскадровка нокдауна: падение → лежит → подъём. Кадры <prefix>_00…_06.png
 func _run_knockshot() -> void:
     demo = true
@@ -5372,6 +5696,22 @@ func _run_knockshot() -> void:
     print("KNOCKSHOT поза_лежа: quat=", player._down_quat.get_euler().snapped(Vector3(0.01, 0.01, 0.01)),
             " pos=", player._down_pos.snapped(Vector3(0.01, 0.01, 0.01)),
             " root=", player.position.snapped(Vector3(0.01, 0.01, 0.01)))
+    # кадр «расжима»: половина нажатий уже есть
+    for i in maxi(int(player.get_up_presses) / 2, 1):
+        player.get_up_press()
+    if touch_ui and touch != null:
+        touch.set_mash(player.get_up_progress,
+                int(round(player.get_up_progress * float(player.get_up_presses))),
+                int(player.get_up_presses))
+    else:
+        hud.set_mash(true, player.get_up_progress,
+                int(round(player.get_up_progress * float(player.get_up_presses))),
+                int(player.get_up_presses))
+    await _knock_shot("%s_%02d.png" % [knock_shot, idx])
+    idx += 1
+    print("KNOCKSHOT расжим: прогресс=", snappedf(player.get_up_progress, 0.01),
+            " нажатий=", int(round(player.get_up_progress * float(player.get_up_presses))),
+            "/", int(player.get_up_presses))
     _start_get_up(player)
     var dur: float = player.get_up_duration
     for frac in [0.2, 0.45, 0.7, 0.9]:
