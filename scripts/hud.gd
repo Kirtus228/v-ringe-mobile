@@ -36,6 +36,7 @@ var chain_bar: ColorRect
 var chain_bg: ColorRect
 var knockdown_lbl: Label
 var training_lbl: Label
+var opp_lbl: Label
 
 var font_n: SystemFont
 var font_b: SystemFont
@@ -62,7 +63,7 @@ func build() -> void:
     p_hp_fill = _bar(44, 44, 300, 16, ACCENT)
     p_stam_fill = _bar(44, 66, 300, 6, AMBER)
 
-    _label(Lang.t("opponent"), 936, 26, 300, 13, MUTED, HORIZONTAL_ALIGNMENT_RIGHT, true)
+    opp_lbl = _label(Lang.t("opponent"), 936, 26, 300, 13, MUTED, HORIZONTAL_ALIGNMENT_RIGHT, true)
     e_hp_fill = _bar(936, 44, 300, 16, RED)
     e_stam_fill = _bar(936, 66, 300, 6, AMBER)
 
@@ -147,6 +148,10 @@ func set_stats(php: float, pst: float, ehp: float, est: float) -> void:
     e_hp_fill.size.x = maxf(0.0, ew)
     e_hp_fill.position.x = 936.0 + (300.0 - ew)
     e_stam_fill.size.x = 300.0 * clampf(est, 0.0, 1.0)
+
+
+func set_opponent_name(name: String) -> void:
+    opp_lbl.text = name if name != "" else Lang.t("opponent")
 
 
 func set_timer(seconds: float) -> void:
@@ -428,7 +433,7 @@ func show_menu(d: Dictionary) -> void:
                 HORIZONTAL_ALIGNMENT_LEFT, false)
 
 
-## Карточка перед боем: тренер даёт совет, дальше — на ринг.
+## Карточка перед боем: кто соперник, чем он опасен и совет тренера.
 func show_prefight(d: Dictionary) -> void:
     _clear_overlay()
     _dim()
@@ -438,21 +443,41 @@ func show_prefight(d: Dictionary) -> void:
     var belt_name := String(d.get("belt_name", ""))
     var belt_col: Color = d.get("belt_color", AMBER)
     var tour_txt := String(d.get("tour", ""))
-    _overlay_label(Lang.t("coach").to_upper(), 0, 116, W, 14, AMBER)
-    _overlay_rect(180, 150, 920, 132, Color(0.02, 0.03, 0.05, 0.88))
-    _overlay_rect(180, 150, 920, 3, AMBER)
-    _overlay_label("«" + tip + "»", 220, 186, 840, 20, Color(0.94, 0.96, 1.0),
+    var opp_name := String(d.get("opp_name", ""))
+    var opp_style := String(d.get("opp_style", ""))
+    var opp_desc := String(d.get("opp_desc", ""))
+    var opp_stats := String(d.get("opp_stats", ""))
+    var opp_dots := String(d.get("opp_dots", ""))
+    var opp_tip := String(d.get("opp_tip", ""))
+    _overlay_label(Lang.t("coach").to_upper(), 0, 96, W, 14, AMBER)
+    _overlay_rect(180, 126, 920, 104, Color(0.02, 0.03, 0.05, 0.88))
+    _overlay_rect(180, 126, 920, 3, AMBER)
+    _overlay_label("«" + tip + "»", 214, 158, 852, 17, Color(0.94, 0.96, 1.0),
+            HORIZONTAL_ALIGNMENT_LEFT, false)
+    # соперник: имя, стиль и его повадки
+    _overlay_rect(180, 242, 920, 234, Color(0.03, 0.035, 0.055, 0.88))
+    _overlay_rect(180, 242, 4, 234, belt_col)
+    _overlay_label(opp_name, 210, 252, 700, 26, Color(0.98, 0.96, 0.90),
+            HORIZONTAL_ALIGNMENT_LEFT, true)
+    _overlay_label(Lang.t("opp_style") + " " + opp_style, 210, 288, 700, 13, belt_col,
+            HORIZONTAL_ALIGNMENT_LEFT, true)
+    _overlay_label(opp_desc, 210, 308, 700, 13, MUTED, HORIZONTAL_ALIGNMENT_LEFT, false)
+    _overlay_label(opp_stats, 210, 332, 700, 13, TEXT, HORIZONTAL_ALIGNMENT_LEFT, false)
+    _overlay_label(Lang.t("difficulty") + " " + opp_dots, 900, 252, 180, 13, AMBER,
+            HORIZONTAL_ALIGNMENT_RIGHT, true)
+    _overlay_label(opp_tip, 210, 356, 860, 12, Color(0.72, 0.82, 0.92),
             HORIZONTAL_ALIGNMENT_LEFT, false)
     var line := Lang.t("belt") + " " + str(belt + 1) + " · " + belt_name + " · "
     line += str(int(d.get("belt_wins", 0))) + " / " + str(int(d.get("belt_fights", 10)))
-    _overlay_label(line, 0, 312, W, 14, belt_col)
+    # подпись пояса и условия турнира — внутри той же карточки
+    _overlay_label(line, 0, 400, W, 14, belt_col)
     if tour_txt != "":
-        _overlay_label(tour_txt, 0, 338, W, 14, Color(0.86, 0.90, 0.98))
+        _overlay_label(tour_txt, 0, 424, W, 14, Color(0.86, 0.90, 0.98))
     if bool(d.get("champion", false)):
-        _overlay_label(Lang.t("champion"), 0, 364, W, 13, AMBER)
-    _btn(Lang.t("fight"), Vector2(470, 396), Vector2(340, 72), "fight", "cta")
+        _overlay_label(Lang.t("champion"), 0, 448, W, 13, AMBER)
+    _btn(Lang.t("fight"), Vector2(470, 486), Vector2(340, 66), "fight", "cta")
     var hint := Lang.t("prefight_hint_touch") if bool(d.get("touch", false)) else Lang.t("prefight_hint")
-    _overlay_label(hint, 0, 486, W, 12, MUTED)
+    _overlay_label(hint, 0, 568, W, 12, MUTED)
 
 
 ## Сюжетные турниры: список с условиями, наградой и статусом.

@@ -8,7 +8,7 @@ static var code := "ru"
 const DICT := {
     # --- меню
     "title": ["В РИНГЕ", "IN THE RING"],
-    "version": ["РАННИЙ ДОСТУП · v22", "EARLY ACCESS · v22"],
+    "version": ["РАННИЙ ДОСТУП · v23", "EARLY ACCESS · v23"],
     "hook": ["Один раунд. 90 секунд. Вылетишь за канаты — проиграл.",
             "One round. 90 seconds. Fly through the ropes — you lose."],
     "play": ["ИГРАТЬ", "PLAY"],
@@ -38,6 +38,7 @@ const DICT := {
     "score": ["ОЧКИ", "SCORE"],
     "knockdown": ["НОКДАУН", "KNOCKDOWN"],
     "training_hud": ["ТРЕНИРОВКА", "TRAINING"],
+    "dummy": ["МАНЕКЕН", "DUMMY"],
     "exit_hint": ["ESC — ВЫЙТИ", "ESC — EXIT"],
     # --- пауза
     "paused": ["ПАУЗА", "PAUSED"],
@@ -52,6 +53,8 @@ const DICT := {
     "story_prologue": ["ПРОЛОГ", "PROLOGUE"],
     "story_chapter": ["ГЛАВА", "CHAPTER"],
     "coach": ["ТРЕНЕР МИХАЛЫЧ", "COACH"],
+    "opp_style": ["СТИЛЬ:", "STYLE:"],
+    "difficulty": ["СЛОЖНОСТЬ", "DIFFICULTY"],
     "fight": ["В БОЙ", "FIGHT"],
     "tournaments": ["СЮЖЕТНЫЕ ТУРНИРЫ", "STORY TOURNAMENTS"],
     "tour_start": ["НАЧАТЬ ТУРНИР", "START TOURNAMENT"],

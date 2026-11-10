@@ -1,4 +1,4 @@
-﻿extends Node3D
+extends Node3D
 ## Боксёр: артикулированный скелет (плечо-локоть, бедро-колено-стопа),
 ## процедурная анимация ударов/блока/уклона/шага, «пьяный» баланс
 ## и физический ragdoll на RigidBody3D при нокдауне.
@@ -236,25 +236,29 @@ var preview := false
 var no_fall := false
 
 
-## Сложность соперника по поясу: чем выше пояс, тем больнее и быстрее он бьёт.
+## Сложность соперника: 0 — первый бой, 1 — последний пояс.
 var diff := 0.0
+
+## Сопротивление падению: у поздних поясов и тяжёлых стилей сбить с ног
+## труднее — иначе вылет за канаты превращается в лёгкую победу без прокачки.
+var fall_resist := 0.0
 
 
 func set_difficulty(v: float) -> void:
-    diff = clampf(v, 0.0, 6.0)
-    dmg_mult = 1.0 + 0.09 * diff
-    dur_mult = maxf(0.72, 1.0 - 0.03 * diff)
+    diff = clampf(v, 0.0, 1.0)
+    dmg_mult = 0.88 + 0.92 * diff
+    dur_mult = 1.0 - 0.16 * diff
 
 
 ## Прокачка: пересчитывает множители под уровень из профиля.
 func set_upgrades(d: Dictionary) -> void:
     for k in upg.keys():
         upg[k] = clampi(int(d.get(k, 0)), 0, 4)
-    dmg_mult = 1.0 + 0.08 * float(upg["power"])
-    dur_mult = 1.0 - 0.06 * float(upg["speed"])
-    stam_mult = 1.0 + 0.12 * float(upg["stamina"])
-    taken_mult = 1.0 - 0.06 * float(upg["guard"])
-    hp_mult = 1.0 + 0.08 * float(upg["health"])
+    dmg_mult = 1.0 + 0.10 * float(upg["power"])
+    dur_mult = 1.0 - 0.07 * float(upg["speed"])
+    stam_mult = 1.0 + 0.15 * float(upg["stamina"])
+    taken_mult = 1.0 - 0.08 * float(upg["guard"])
+    hp_mult = 1.0 + 0.10 * float(upg["health"])
     max_stamina = 100.0 * stam_mult
     stamina = minf(stamina, max_stamina)
 
@@ -262,11 +266,9 @@ func set_upgrades(d: Dictionary) -> void:
 func setup(as_player: bool, look_data: Dictionary = {}) -> void:
     is_player = as_player
     if look_data.is_empty():
-        look = LookScript.default_look()
+        look = LookScript.default_look() if is_player else LOOK_ENEMY.duplicate()
     else:
         look = look_data.duplicate()
-    if not is_player:
-        look = LOOK_ENEMY.duplicate()
     _build()
 
 
@@ -944,7 +946,7 @@ func _rig_tick(dt: float) -> void:
     var dl: Vector3 = to_local(rj_chest.p) - to_local(rj_pelvis.p)
     tilt = Vector2(atan2(dl.x, maxf(dl.y, 0.05)), atan2(-dl.z, maxf(dl.y, 0.05)))
     tilt_vel = Vector2.ZERO
-    if stun > 0.0 and tilt.length() > FALL_TILT and not no_fall:
+    if stun > 0.0 and tilt.length() > FALL_TILT + 3.0 * fall_resist and not no_fall:
         _fall_down()
 
 

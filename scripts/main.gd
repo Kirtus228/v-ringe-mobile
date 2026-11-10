@@ -57,6 +57,123 @@ const TIPS := [
     "Первые полминуты — разведка. Посмотри, что он делает после твоей атаки.",
 ]
 
+## Соперники: восемь характеров боя. hp/dmg/spd/stam — множители к базовым
+## параметрам боя, остальное — повадки: как часто лезет (aggr), держит блок
+## (guard), уклоняется (dodge), сколько замахивается (wind), как быстро
+## восстанавливается (rec), с какой дистанции работает (range), сколько
+## бьёт в серии (combo) и как часто отвечает после защиты (counter).
+## mix — доли джеба, левого хука, правого хука и апперкота.
+## look — [цвет шорт, цвет перчаток, фигура, размер перчаток].
+const STYLES := [
+    {"id": "puncher", "ru": "ПАНЧЕР", "en": "PUNCHER",
+        "desc_ru": "бьёт редко, но каждый удар — молот",
+        "desc_en": "throws rarely, but every punch is a hammer",
+        "tip_ru": "Не стой в обмене: пропустил тяжёлый — сразу уходи на дистанцию.",
+        "tip_en": "Do not trade: after a heavy punch, get out of range.",
+        "hp": 1.02, "dmg": 1.30, "spd": 1.14, "stam": 1.00, "heavy": 0.10,
+        "aggr": 0.50, "guard": 0.30, "dodge": 0.04, "wind": 1.35,
+        "rec": 1.12, "range": 1.42, "combo": 1, "counter": 0.10,
+        "mix": [0.08, 0.22, 0.58, 0.12],
+        "look": ["red", "black", "heavy", "twelve"],
+        "nick_ru": ["МОЛОТ", "КУВАЛДА", "ПУШКА", "ГИРЯ", "БУЛЬДОЗЕР", "ТЯЖЁЛЫЙ"],
+        "nick_en": ["HAMMER", "SLEDGE", "CANNON", "ANVIL", "BULLDOZER", "HEAVY"]},
+    {"id": "speedster", "ru": "СКОРОСТНИК", "en": "SPEEDSTER",
+        "desc_ru": "лёгкий и быстрый, сыплет джебами",
+        "desc_en": "light and fast, peppers you with jabs",
+        "tip_ru": "Держи блок у подбородка: он бьёт часто и ищет открытую голову.",
+        "tip_en": "Keep your guard high: he throws often and hunts an open head.",
+        "hp": 0.92, "dmg": 0.84, "spd": 0.78, "stam": 1.05,
+        "aggr": 0.80, "guard": 0.32, "dodge": 0.20, "wind": 0.82,
+        "rec": 0.72, "range": 1.42, "combo": 2, "counter": 0.15,
+        "mix": [0.55, 0.20, 0.15, 0.10],
+        "look": ["green", "white", "lean", "ten"],
+        "nick_ru": ["ИСКРА", "ВЕТЕР", "СТРЕЛА", "МОЛНИЯ", "ЮЛА", "ШУСТРЫЙ"],
+        "nick_en": ["SPARK", "WIND", "ARROW", "BOLT", "SPINNER", "QUICK"]},
+    {"id": "defender", "ru": "ЗАЩИТНИК", "en": "DEFENDER",
+        "desc_ru": "глухая защита и ответ после блока",
+        "desc_en": "tight guard and a counter after blocking",
+        "tip_ru": "Не бей в блок: два удара в защиту — он откроется, тогда и бей.",
+        "tip_en": "Do not punch the guard: two blocked punches open him up.",
+        "hp": 1.08, "dmg": 0.96, "spd": 1.04, "stam": 1.10, "heavy": 0.05,
+        "aggr": 0.36, "guard": 0.74, "dodge": 0.12, "wind": 1.05,
+        "rec": 1.00, "range": 1.40, "combo": 1, "counter": 0.45,
+        "mix": [0.35, 0.30, 0.20, 0.15],
+        "look": ["blue", "white", "normal", "fourteen"],
+        "nick_ru": ["КАМЕНЬ", "СТЕНА", "БРОНЯ", "ЩИТ", "ЗАМОК", "НЕПРОБИВАЕМЫЙ"],
+        "nick_en": ["STONE", "WALL", "ARMOR", "SHIELD", "CASTLE", "IRONCLAD"]},
+    {"id": "aggressor", "ru": "АГРЕССОР", "en": "AGGRESSOR",
+        "desc_ru": "лезет вперёд и не даёт дышать",
+        "desc_en": "walks you down and gives no room to breathe",
+        "tip_ru": "Он идёт вперёд — встречай джебом и уходи в сторону, не стой в углу.",
+        "tip_en": "He keeps coming: meet him with the jab and step aside.",
+        "hp": 1.00, "dmg": 1.02, "spd": 0.92, "stam": 1.18,
+        "aggr": 0.95, "guard": 0.14, "dodge": 0.06, "wind": 0.95,
+        "rec": 0.80, "range": 1.30, "combo": 3, "counter": 0.05,
+        "mix": [0.30, 0.35, 0.30, 0.05],
+        "look": ["black", "red", "normal", "twelve"],
+        "nick_ru": ["БУРЯ", "ПРЕСС", "ТАРАН", "ОГОНЬ", "ДАВИЛА", "ШТОРМ"],
+        "nick_en": ["STORM", "PRESS", "RAM", "FIRE", "CRUSHER", "GALE"]},
+    {"id": "sniper", "ru": "СНАЙПЕР", "en": "SNIPER",
+        "desc_ru": "держит дистанцию и бьёт с дальней",
+        "desc_en": "keeps his distance and snipes from range",
+        "tip_ru": "Он бегает по рингу — режь угол и не гонись за ним по прямой.",
+        "tip_en": "He circles the ring: cut the angle instead of chasing.",
+        "hp": 0.98, "dmg": 0.98, "spd": 0.90, "stam": 1.00,
+        "aggr": 0.56, "guard": 0.36, "dodge": 0.16, "wind": 0.90,
+        "rec": 0.85, "range": 1.55, "combo": 1, "counter": 0.18,
+        "mix": [0.65, 0.10, 0.10, 0.15],
+        "look": ["white", "blue", "lean", "twelve"],
+        "nick_ru": ["ОХОТНИК", "СТРЕЛОК", "ПРИЦЕЛ", "КОМАР", "СНАЙП", "ДАЛЬНИЙ"],
+        "nick_en": ["HUNTER", "SHARPSHOOTER", "SCOPE", "MOSQUITO", "SNIPE", "LONG"]},
+    {"id": "counter", "ru": "КОНТРБОКСЁР", "en": "COUNTERPUNCHER",
+        "desc_ru": "ждёт твою атаку и отвечает",
+        "desc_en": "waits for your attack and answers it",
+        "tip_ru": "Не бросай одиночный удар в пустоту — он ловит. Бей серией.",
+        "tip_en": "Do not throw one lonely punch: he catches it. Work in bursts.",
+        "hp": 1.00, "dmg": 1.06, "spd": 0.94, "stam": 1.06,
+        "aggr": 0.44, "guard": 0.56, "dodge": 0.28, "wind": 0.95,
+        "rec": 0.80, "range": 1.45, "combo": 2, "counter": 0.60,
+        "mix": [0.22, 0.28, 0.28, 0.22],
+        "look": ["gold", "black", "normal", "fourteen"],
+        "nick_ru": ["ЭХО", "КАПКАН", "ПРУЖИНА", "ЗЕРКАЛО", "СТОРОЖ", "ОТВЕТ"],
+        "nick_en": ["ECHO", "TRAP", "SPRING", "MIRROR", "SENTRY", "REPLY"]},
+    {"id": "tank", "ru": "ТАНК", "en": "TANK",
+        "desc_ru": "мало падает и много терпит",
+        "desc_en": "hard to drop and hard to hurt",
+        "tip_ru": "Его не сломать одним ударом — работай сериями и береги выносливость.",
+        "tip_en": "One punch will not drop him: work in bursts, save stamina.",
+        "hp": 1.28, "dmg": 1.08, "spd": 1.18, "stam": 1.38, "heavy": 0.35,
+        "aggr": 0.56, "guard": 0.46, "dodge": 0.02, "wind": 1.18,
+        "rec": 1.02, "range": 1.34, "combo": 1, "counter": 0.10,
+        "mix": [0.16, 0.40, 0.34, 0.10],
+        "look": ["black", "gold", "heavy", "fourteen"],
+        "nick_ru": ["БЕТОН", "МЕДВЕДЬ", "СКАЛА", "УТЮГ", "ДУБ", "ТИТАН"],
+        "nick_en": ["CONCRETE", "BEAR", "ROCK", "IRON", "OAK", "TITAN"]},
+    {"id": "clincher", "ru": "КЛИНЧЕР", "en": "CLINCHER",
+        "desc_ru": "липнет вплотную и молотит по корпусу",
+        "desc_en": "sticks to your chest and hammers the body",
+        "tip_ru": "Не давай ему войти вплотную: держи дистанцию джебом и уходи.",
+        "tip_en": "Do not let him inside: keep the jab out and step away.",
+        "hp": 1.16, "dmg": 1.00, "spd": 1.06, "stam": 1.26, "heavy": 0.20,
+        "aggr": 0.88, "guard": 0.24, "dodge": 0.04, "wind": 1.00,
+        "rec": 0.92, "range": 1.22, "combo": 2, "counter": 0.12,
+        "mix": [0.12, 0.45, 0.36, 0.07],
+        "look": ["red", "white", "heavy", "twelve"],
+        "nick_ru": ["КЛЕЩ", "УДАВ", "ТИСКИ", "МЕЛЬНИЦА", "БУЛЬДОГ", "ЛИПКИЙ"],
+        "nick_en": ["PINCHER", "BOA", "VICE", "MILL", "BULLDOG", "STICKY"]},
+]
+
+## Имена соперников: имя + прозвище стиля, без повторов на всю карьеру.
+const OPP_FIRST_RU := ["АЛЕКСЕЙ", "МАКСИМ", "ИВАН", "ДМИТРИЙ", "СЕРГЕЙ", "АНДРЕЙ",
+        "НИКИТА", "ПАВЕЛ", "РОМАН", "ЕГОР", "АРТЁМ", "КИРИЛЛ", "ГЛЕБ", "ТИМУР",
+        "МАРК", "ДАНИИЛ"]
+const OPP_FIRST_EN := ["ALEXEI", "MAXIM", "IVAN", "DMITRY", "SERGEI", "ANDREI",
+        "NIKITA", "PAVEL", "ROMAN", "EGOR", "ARTEM", "KIRILL", "GLEB", "TIMUR",
+        "MARK", "DANIIL"]
+
+## Дистанция боя: 60 соперников карьеры + подсказка, что без прокачки дальше не пройти.
+const FIGHT_COUNT := 60
+
 const ASSESS_WIN_KO := [
     "Вот это работа. Он не понял, что его снесло — лучший комплимент.",
     "Чисто закрыл. Не зазнавайся: следующий будет злее.",
@@ -81,6 +198,12 @@ const ASSESS_LOSE := [
     "Проиграл — не страшно. Ошибка была в ногах, я видел. Разберём.",
     "Он тебя переиграл в темпе. На следующем бою держи дистанцию.",
     "Голову выше. Такие бои учат больше, чем лёгкие победы.",
+]
+## Отдельная оценка, когда соперник уже объективно сильнее игрока.
+const ASSESS_UPG := [
+    "Он крепче и злее тебя. Без прокачки такой бой не вытянуть — иди в ПРОКАЧКУ.",
+    "Вот что значит разница в подготовке. Вложи форму в силу и защиту.",
+    "Такой темп на голых руках не держится. Прокачай здоровье и выносливость.",
 ]
 
 
@@ -110,12 +233,13 @@ const RESERVED_KEYS := [KEY_ESCAPE, KEY_ENTER, KEY_KP_ENTER, KEY_SPACE, KEY_C, K
         KEY_P, KEY_F, KEY_V, KEY_H, KEY_F1, KEY_F11, KEY_TAB, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT]
 
 ## Прокачка за отдельную валюту («форма»): 4 уровня, цена растёт.
+## Чем выше пояс, тем важнее вложения: без них соперники быстро переигрывают.
 const UPGRADES := [
-    {"id": "power", "name": "СИЛА", "desc": "+8% урона за уровень"},
-    {"id": "speed", "name": "СКОРОСТЬ", "desc": "удары быстрее на 6%"},
-    {"id": "stamina", "name": "ВЫНОСЛИВОСТЬ", "desc": "+12% выносливости и её восстановления"},
-    {"id": "guard", "name": "ЗАЩИТА", "desc": "−6% полученного урона"},
-    {"id": "health", "name": "ЗДОРОВЬЕ", "desc": "+8% здоровья"},
+    {"id": "power", "name": "СИЛА", "desc": "+10% урона за уровень"},
+    {"id": "speed", "name": "СКОРОСТЬ", "desc": "удары быстрее на 7%"},
+    {"id": "stamina", "name": "ВЫНОСЛИВОСТЬ", "desc": "+15% выносливости и её восстановления"},
+    {"id": "guard", "name": "ЗАЩИТА", "desc": "−8% полученного урона"},
+    {"id": "health", "name": "ЗДОРОВЬЕ", "desc": "+10% здоровья"},
 ]
 const UPG_MAX := 4
 
@@ -159,6 +283,9 @@ var belt_wins := 0
 var belt_won := false
 var champion := false
 var ai_skill := 0
+## Текущий соперник: имя, стиль, параметры боя и внешность.
+var opp: Dictionary = {}
+var _enemy_look_key := ""
 var lang_code := "ru"
 var lang_override := ""
 var belt_override := -1
@@ -223,6 +350,8 @@ var anim_test := false
 var upg_test := false
 var click_test := false
 var career_test := false
+var diff_test := false
+var balance_test := false
 var snd_test := false
 var save_test := false
 var coach_test := false
@@ -353,6 +482,10 @@ func _ready() -> void:
         _run_clicktest()
     if career_test:
         _run_careertest()
+    if diff_test:
+        _run_difftest()
+    if balance_test:
+        _run_balancetest()
     if snd_test:
         _run_sndtest()
     if save_test:
@@ -554,6 +687,10 @@ func _parse_args() -> void:
             click_test = true
         elif a == "--careertest":
             career_test = true
+        elif a == "--difftest":
+            diff_test = true
+        elif a == "--balancetest":
+            balance_test = true
         elif a == "--sndtest":
             snd_test = true
         elif a == "--savetest":
@@ -703,7 +840,8 @@ func _pick_assessment() -> String:
     var pool: Array = ASSESS_WIN_KO
     var won := pending == "win" or pending == "ringout" or pending == "timewin"
     if not won:
-        pool = ASSESS_LOSE
+        # если соперник уже объективно сильнее — тренер прямо говорит про прокачку
+        pool = ASSESS_UPG if (_fight_level() > 0.28 and _upg_total() < 5) else ASSESS_LOSE
     elif pending == "ringout":
         pool = ASSESS_RINGOUT
     elif pending == "timewin":
@@ -715,6 +853,115 @@ func _pick_assessment() -> String:
         idx = (idx + 1) % pool.size()
     last_assess = idx
     return String(pool[idx])
+
+
+## Номер боя карьеры (0..59): пояс и победы внутри пояса.
+func _opp_index() -> int:
+    var idx := belt * BELT_FIGHTS + belt_wins
+    if tour_id != "":
+        var t := _tournament_by_id(tour_id)
+        var need := int(t.get("need", 0))
+        idx = maxi(idx, need * BELT_FIGHTS + 4 + 4 * tour_wins)
+    return clampi(idx, 0, FIGHT_COUNT - 1)
+
+
+## Уровень боя 0..1: 0 — первый выход на ринг, 1 — последний пояс.
+func _fight_level() -> float:
+    return clampf(float(_opp_index()) / float(FIGHT_COUNT - 1), 0.0, 1.0)
+
+
+func _opp_style() -> Dictionary:
+    if opp.is_empty():
+        return STYLES[0]
+    return opp.get("style", STYLES[0])
+
+
+func _opp_name(o: Dictionary) -> String:
+    if o.is_empty():
+        return Lang.t("opponent")
+    var st: Dictionary = o.get("style", STYLES[0])
+    var firsts: Array = OPP_FIRST_EN if Lang.is_en() else OPP_FIRST_RU
+    var nicks: Array = st.get("nick_en", []) if Lang.is_en() else st.get("nick_ru", [])
+    var fi := int(o.get("first", 0)) % firsts.size()
+    var ni := int(o.get("nick", 0)) % nicks.size()
+    return String(firsts[fi]) + " «" + String(nicks[ni]) + "»"
+
+
+## Внешность соперника: цвета зависят от стиля, мелочи — от номера боя.
+func _opp_look(o: Dictionary) -> Dictionary:
+    var st: Dictionary = o.get("style", STYLES[0])
+    var n := int(o.get("n", 0))
+    var base: Array = st["look"]
+    var skins := ["light", "pale", "tan", "olive", "dark", "deep"]
+    var hairs := ["bald", "buzz", "mohawk", "tail", "afro"]
+    var hair_cols := ["black", "brown", "blond", "red", "crimson", "gray", "blue"]
+    var shorts := ["short", "long"]
+    var boots := ["hi", "low", "bare"]
+    var boots_cols := ["black", "red", "white", "blue", "gold"]
+    return {
+        "hair": String(hairs[(n * 3 + 1) % hairs.size()]),
+        "hair_color": String(hair_cols[(n * 5 + 2) % hair_cols.size()]),
+        "skin": String(skins[(n * 7 + 3) % skins.size()]),
+        "build": String(base[2]),
+        "gloves": String(base[3]),
+        "gloves_color": String(base[1]),
+        "shorts": String(shorts[n % shorts.size()]),
+        "shorts_color": String(base[0]),
+        "boots": String(boots[(n * 2) % boots.size()]),
+        "boots_color": String(boots_cols[(n * 3) % boots_cols.size()]),
+    }
+
+
+## Собрать соперника под текущий бой: стиль, имя, цифры и внешность.
+## Уровень растёт каждый бой, поэтому без прокачки дальше пояса не пройти.
+func _make_opponent() -> Dictionary:
+    var n := _opp_index()
+    var level := clampf(float(n) / float(FIGHT_COUNT - 1), 0.0, 1.0)
+    var si := (n * 5 + 3) % STYLES.size()
+    var st: Dictionary = STYLES[si]
+    var combo := (n * 61) % 96
+    var o := {
+        "n": n, "level": level, "style": st, "style_i": si,
+        "first": combo / 6, "nick": combo % 6,
+        "hp": 105.0 * (1.0 + 0.65 * level) * float(st["hp"]),
+        "dmg": (0.88 + 0.92 * level) * float(st["dmg"]),
+        "spd": (1.0 - 0.16 * level) * float(st["spd"]),
+        "dmg_style": float(st["dmg"]),
+        "spd_style": float(st["spd"]),
+        "stam": 100.0 * float(st["stam"]),
+    }
+    o["name"] = _opp_name(o)
+    o["look"] = _opp_look(o)
+    return o
+
+
+## Надеть соперника на бойца: здоровье, урон, скорость, выносливость и вид.
+func _apply_opponent() -> void:
+    opp = _make_opponent()
+    ai_skill = int(round(float(opp["level"]) * 5.0))
+    enemy.reset(Vector3(0, 0, -1.9), float(opp["hp"]))
+    enemy.set_difficulty(float(opp["level"]))
+    enemy.dmg_mult *= float(opp["dmg_style"])
+    enemy.dur_mult *= float(opp["spd_style"])
+    enemy.max_stamina = float(opp["stam"])
+    enemy.stamina = enemy.max_stamina
+    # на поздних поясах сбить с ног и выкинуть за канаты намного труднее
+    enemy.fall_resist = clampf(0.55 * float(opp["level"])
+            + float(_opp_style().get("heavy", 0.0)), 0.0, 1.0)
+    player.fall_resist = 0.45 * float(opp["level"])
+    # поздние соперники крепче держат удар: без прокачки силы их не пробить
+    enemy.taken_mult = 1.0 - 0.35 * float(opp["level"])
+    var lk: Dictionary = opp["look"]
+    if _enemy_look_key != str(lk):
+        _enemy_look_key = str(lk)
+        enemy.set_look(lk)
+
+
+func _upg_total() -> int:
+    var s := 0
+    for k in upg.keys():
+        s += int(upg[k])
+    return s
 
 
 func _tournament(i: int) -> Dictionary:
@@ -858,6 +1105,7 @@ func _start_career_fight() -> void:
 
 
 func _start_prefight() -> void:
+    opp = _make_opponent()
     _set_state(St.PREFIGHT)
 
 
@@ -873,15 +1121,47 @@ func _prefight_key(code: int) -> void:
 
 
 func _prefight_data() -> Dictionary:
+    if opp.is_empty():
+        opp = _make_opponent()
     var tour_txt := ""
     if tour_id != "":
         var t := _tournament_by_id(tour_id)
         tour_txt = String(t.get("name", "")) + " · бой " + str(tour_wins + 1) + " из " \
                 + str(int(t.get("fights", 3)))
+    var st: Dictionary = _opp_style()
+    var level := float(opp.get("level", 0.0))
+    var dots := ""
+    var filled: int = clampi(1 + int(round(level * 4.0)), 1, 5)
+    for i in 5:
+        dots += "●" if i < filled else "○"
+    var en := Lang.is_en()
+    var hp_w := ["обычное", "крепкое", "очень крепкое"]
+    var pw_w := ["обычная", "сильная", "очень сильная"]
+    var sp_w := ["очень быстрая", "быстрая", "обычная", "медленная"]
+    if en:
+        hp_w = ["normal", "strong", "very strong"]
+        pw_w = ["normal", "strong", "very strong"]
+        sp_w = ["very fast", "fast", "normal", "slow"]
+    var hp_rel := float(opp.get("hp", 105.0)) / 105.0
+    var hp_word: String = hp_w[0] if hp_rel < 1.10 else (hp_w[1] if hp_rel < 1.30 else hp_w[2])
+    var dmg_rel := float(opp.get("dmg", 1.0))
+    var dmg_word: String = pw_w[0] if dmg_rel < 1.0 else (pw_w[1] if dmg_rel < 1.35 else pw_w[2])
+    var spd_rel := float(opp.get("spd", 1.0))
+    var spd_word: String = sp_w[0] if spd_rel < 0.88 else (sp_w[1] if spd_rel < 1.0
+            else (sp_w[2] if spd_rel < 1.12 else sp_w[3]))
+    var stats: String
+    if en:
+        stats = "HEALTH: " + hp_word + " · POWER: " + dmg_word + " · SPEED: " + spd_word
+    else:
+        stats = "ЗДОРОВЬЕ: " + hp_word + " · СИЛА: " + dmg_word + " · СКОРОСТЬ: " + spd_word
     return {"tip": coach_tip, "belt": belt, "belt_name": _belt_name(),
             "belt_color": _belt_color(), "belt_wins": belt_wins,
             "belt_fights": BELT_FIGHTS, "tour": tour_txt,
-            "enemy_hp": 110.0 * (1.0 + 0.10 * float(belt)),
+            "opp_name": String(opp.get("name", "")),
+            "opp_style": String(st.get("en" if en else "ru", "")),
+            "opp_desc": String(st.get("desc_en" if en else "desc_ru", "")),
+            "opp_tip": String(st.get("tip_en" if en else "tip_ru", "")),
+            "opp_stats": stats, "opp_dots": dots, "opp_level": level,
             "champion": champion, "touch": touch_ui}
 
 
@@ -1200,13 +1480,11 @@ func _reset_fight() -> void:
     steps_total = 0
     head_hits = 0
     training_hits = 0
-    ai = {"state": "wait", "t": 0.9, "pending": "jab"}
+    ai = {"state": "wait", "t": 0.9, "pending": "jab", "combo": 0, "counter_ok": false}
     player.preview = false
     player.reset(Vector3(0, 0, 1.9), 100.0)
-    # пояс задаёт силу соперника: 110 hp на дебюте и +10% за пояс
-    ai_skill = belt
-    enemy.reset(Vector3(0, 0, -1.9), 110.0 * (1.0 + 0.10 * float(belt)))
-    enemy.set_difficulty(float(belt))
+    # соперник свой на каждый бой: уровень, стиль, имя и внешность
+    _apply_opponent()
     _face_each_other()
     _refresh_hud()
 
@@ -1311,9 +1589,10 @@ func _apply_forced_state() -> void:
 
 
 func _start_fight() -> void:
-    ai_skill = belt
     _reset_fight()
     state = St.FIGHT
+    # на ринге видно, против кого бой: имя вместо общей подписи
+    hud.set_opponent_name(String(opp.get("name", "")))
     # карточка тренера и меню прячут полоски — бой обязан включить их обратно
     hud.set_battle_visible(true)
     if touch_ui and touch != null:
@@ -1631,7 +1910,8 @@ func _ropes_tick(delta: float) -> void:
                 arena.pulse(0.07)
             if randf() < 0.3:
                 sfx.play("shove", randf_range(1.15, 1.35), -21.0)
-        if not ringout and ringout_stage == 0 and (absf(pp.x) > 3.55 or absf(pp.z) > 3.55):
+        if not ringout and ringout_stage == 0 and (absf(pp.x) > 3.75 or absf(pp.z) > 3.75) \
+                and (spd > 2.9 or pp.y > 1.15):
             _begin_ringout(f)
 
 
@@ -1773,33 +2053,80 @@ func _move_player(dir: Vector3, delta: float) -> void:
     player.drive(dir, delta)
 
 
+## Автопилот: демонстрационный бой и эталон для теста баланса.
+## Держит дистанцию, закрывается от замаха и бьёт только в досягаемости.
 func _autopilot(delta: float) -> void:
-    player.blocking = false
     var to := enemy.position - player.position
     to.y = 0.0
     var dist := to.length()
     if passive:
+        player.blocking = false
         if dist < 2.2:
             player.drive(-to, delta)
         return
-    if dist > 1.35:
+    var threat: bool = enemy.telegraph or enemy.punch_kind != ""
+    if threat and dist < 1.75:
+        player.blocking = true
+        player_move = Vector3.ZERO
+        if enemy.punch_kind == "" and player.punch_kind == "" and randf() < delta * 2.2:
+            # соперник промахнулся или восстанавливается — короткий ответ
+            player.blocking = false
+            _punch(player, enemy, "jab")
+        elif randf() < delta * 1.2 and player.stamina > 30.0:
+            player.try_dodge()
+        return
+    player.blocking = false
+    if dist > 1.42:
         player_move = to.normalized()
         player.drive(to, delta)
-    else:
+    elif dist < 1.02:
         player_move = -to.normalized()
-        player.drive(-to * 0.4, delta)
-    if randf() < delta * 1.6:
+        player.drive(-to * 0.5, delta)
+    else:
+        player_move = Vector3.ZERO
+    if randf() < delta * 1.1:
         player.try_dodge()
-    if randf() < delta * 2.2:
+    if dist < 1.5 and player.punch_kind == "" and randf() < delta * 2.6:
         var pick := randf()
-        if pick < 0.35:
+        if pick < 0.42:
             _punch(player, enemy, "jab")
-        elif pick < 0.6:
+        elif pick < 0.66:
             _punch(player, enemy, "lhook")
-        elif pick < 0.82:
+        elif pick < 0.86:
             _punch(player, enemy, "rhook")
         else:
             _punch(player, enemy, "upper")
+
+
+## Удар под дистанцию: с дальней хуком в пустоту не бьют.
+func _pick_attack(st: Dictionary, dist: float) -> String:
+    var mix: Array = st.get("mix", [0.3, 0.3, 0.3, 0.1])
+    var kinds := ["jab", "lhook", "rhook", "upper"]
+    var reach := [1.45, 1.30, 1.28, 1.25]
+    var weights: Array = []
+    var total := 0.0
+    for i in kinds.size():
+        var w := float(mix[i]) if i < mix.size() else 0.0
+        if dist > float(reach[i]) - 0.04:
+            w = 0.0
+        weights.append(w)
+        total += w
+    if total <= 0.001:
+        return "jab"
+    var r := randf() * total
+    for i in weights.size():
+        r -= float(weights[i])
+        if r <= 0.0:
+            return String(kinds[i])
+    return "jab"
+
+
+## Замах соперника: время зависит от стиля (ветер) и уровня боя (навык).
+func _ai_start_windup(st: Dictionary, skill: float) -> void:
+    ai["state"] = "windup"
+    ai["t"] = float(st.get("wind", 1.0)) * maxf(0.16, 0.34 - 0.09 * skill)
+    ai["pending"] = _pick_attack(st, _distance())
+    enemy.telegraph = true
 
 
 func _ai_tick(delta: float) -> void:
@@ -1811,90 +2138,118 @@ func _ai_tick(delta: float) -> void:
         ai["state"] = "wait"
         ai["t"] = 0.5
         return
+    var st: Dictionary = _opp_style()
+    var skill := clampf(float(opp.get("level", 0.0)), 0.0, 1.0)
+    var guard_p := float(st.get("guard", 0.35))
+    var dodge_p := float(st.get("dodge", 0.08)) + 0.10 * skill
+    var aggr := clampf(float(st.get("aggr", 0.55)) + 0.12 * skill, 0.2, 1.0)
+    var reach := float(st.get("range", 1.40))
+    var counter_p := float(st.get("counter", 0.10))
     ai["t"] = float(ai["t"]) - delta
     var dist := _distance()
     enemy_move = Vector3.ZERO
 
-    # реакция на удар игрока: иногда уклон или блок
+    # реакция на удар игрока: уклон или блок, у контратакующего — сразу ответ
     if player.punch_kind != "" and _last_player_punch != player.punch_kind:
         _last_player_punch = player.punch_kind
-        if ai["state"] == "wait" or ai["state"] == "guard" or ai["state"] == "approach":
+        var busy: bool = str(ai["state"]) == "windup" or str(ai["state"]) == "recover"
+        if not busy:
             var react := randf()
-            if react < 0.18 + 0.05 * float(ai_skill) and enemy.stamina > 20.0:
+            if react < dodge_p and enemy.stamina > 20.0:
                 enemy.try_dodge()
-            elif react < 0.42 and enemy.stamina > 6.0:
+                if randf() < counter_p + 0.20 * skill:
+                    ai["state"] = "counter"
+                    ai["t"] = 0.10
+            elif react < dodge_p + guard_p * (0.80 + 0.20 * skill) and enemy.stamina > 6.0:
                 enemy.blocking = true
                 ai["state"] = "guard"
-                ai["t"] = randf_range(0.25, 0.45)
+                ai["t"] = randf_range(0.20, 0.40)
+                ai["counter_ok"] = randf() < counter_p
     elif player.punch_kind == "":
         _last_player_punch = ""
 
     match str(ai["state"]):
         "wait":
-            if float(ai["t"]) <= 0.0:
-                if dist > 1.62:
-                    ai["state"] = "approach"
-                    ai["t"] = 1.2
+            if float(ai["t"]) > 0.0:
+                return
+            if dist > reach + 0.16:
+                ai["state"] = "approach"
+                ai["t"] = 1.2
+            elif enemy.stamina < 12.0:
+                ai["state"] = "retreat"
+                ai["t"] = randf_range(0.5, 1.0)
+            elif dist < reach - 0.22 and randf() < 0.35:
+                ai["state"] = "retreat"
+                ai["t"] = randf_range(0.25, 0.55)
+            else:
+                var r := randf()
+                if r < aggr and enemy.stamina > 16.0:
+                    ai["combo"] = int(st.get("combo", 1)) - 1
+                    _ai_start_windup(st, skill)
+                elif r < aggr + guard_p * 0.45:
+                    ai["state"] = "guard"
+                    ai["t"] = randf_range(0.30, 0.70)
+                    enemy.blocking = true
+                elif r < aggr + guard_p * 0.45 + 0.14:
+                    ai["state"] = "retreat"
+                    ai["t"] = randf_range(0.22, 0.50)
                 else:
-                    var r := randf()
-                    if r < 0.55 + 0.06 * float(ai_skill) and enemy.stamina > 18.0:
-                        ai["state"] = "windup"
-                        ai["t"] = maxf(0.20, 0.42 - 0.03 * float(ai_skill))
-                        var pick := randf()
-                        if pick < 0.34:
-                            ai["pending"] = "jab"
-                        elif pick < 0.55:
-                            ai["pending"] = "lhook"
-                        elif pick < 0.75:
-                            ai["pending"] = "rhook"
-                        elif pick < 0.9:
-                            ai["pending"] = "upper"
-                        else:
-                            ai["pending"] = "jab"
-                        enemy.telegraph = true
-                    elif r < 0.74:
-                        ai["state"] = "guard"
-                        ai["t"] = randf_range(0.4, 0.8)
-                        enemy.blocking = true
-                    elif r < 0.88:
-                        ai["state"] = "retreat"
-                        ai["t"] = randf_range(0.3, 0.6)
-                    else:
-                        ai["t"] = randf_range(0.2, 0.5)
+                    ai["t"] = randf_range(0.12, 0.35)
         "approach":
             var to := player.position - enemy.position
             to.y = 0.0
-            if to.length() > 1.42:
+            if to.length() > reach + 0.02:
                 enemy_move = to.normalized()
                 enemy.drive(to, delta)
                 _clamp_ring(enemy)
-            if _distance() <= 1.45:
+            if _distance() <= reach + 0.12 or float(ai["t"]) <= 0.0:
                 ai["state"] = "wait"
-                ai["t"] = randf_range(0.1, 0.3)
+                ai["t"] = randf_range(0.05, 0.20)
         "retreat":
             var away := enemy.position - player.position
             away.y = 0.0
             enemy_move = -away.normalized()
             enemy.drive(-away, delta)
             _clamp_ring(enemy)
-            if float(ai["t"]) <= 0.0:
+            if float(ai["t"]) <= 0.0 or _distance() > reach + 0.45:
                 ai["state"] = "wait"
-                ai["t"] = randf_range(0.2, 0.5)
+                ai["t"] = randf_range(0.10, 0.30)
         "guard":
             if float(ai["t"]) <= 0.0:
                 enemy.blocking = false
-                ai["state"] = "wait"
-                ai["t"] = randf_range(0.2, 0.5)
+                if bool(ai.get("counter_ok", false)) and enemy.stamina > 14.0 \
+                        and dist < reach + 0.20:
+                    ai["counter_ok"] = false
+                    ai["combo"] = 0
+                    _ai_start_windup(st, skill)
+                else:
+                    ai["state"] = "wait"
+                    ai["t"] = randf_range(0.10, 0.30)
+        "counter":
+            if float(ai["t"]) <= 0.0:
+                if enemy.stamina > 14.0:
+                    ai["combo"] = 0
+                    _ai_start_windup(st, skill)
+                else:
+                    ai["state"] = "wait"
+                    ai["t"] = randf_range(0.12, 0.30)
         "windup":
             if float(ai["t"]) <= 0.0:
                 enemy.telegraph = false
-                _punch(enemy, player, str(ai["pending"]))
+                if _distance() <= reach + 0.38:
+                    _punch(enemy, player, str(ai["pending"]))
+                ai["combo"] = int(ai.get("combo", 0)) - 1
                 ai["state"] = "recover"
-                ai["t"] = maxf(0.30, 0.6 - 0.05 * float(ai_skill))
+                ai["t"] = maxf(0.12, 0.42 - 0.14 * skill) * float(st.get("rec", 1.0))
         "recover":
             if float(ai["t"]) <= 0.0 and enemy.punch_kind == "":
-                ai["state"] = "wait"
-                ai["t"] = randf_range(0.3, 0.9)
+                if int(ai.get("combo", 0)) > 0 and enemy.stamina > 14.0 \
+                        and _distance() < reach + 0.28:
+                    _ai_start_windup(st, skill)
+                else:
+                    ai["state"] = "wait"
+                    ai["t"] = maxf(0.10, randf_range(0.20, 0.60) * float(st.get("rec", 1.0))
+                            - 0.10 * skill)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -2270,7 +2625,11 @@ func _resolve(att: Node3D, def: Node3D, kind: String) -> void:
         var dmg: float = float(p["dmg"]) * 0.18 * att.dmg_mult
         def.hp = maxf(0.0, def.hp - dmg)
         def.taken += dmg
-        def.stamina = maxf(0.0, def.stamina - 8.0)
+        # блок гасит удар, но выматывает: чем сильнее соперник, тем дороже держать
+        var stam_cost := 8.0
+        if att == enemy:
+            stam_cost += 10.0 * float(opp.get("level", 0.0))
+        def.stamina = maxf(0.0, def.stamina - stam_cost)
         def.flash = 0.07
         def.position += push_dir * float(p["push"]) * 0.35
         def.push_impulse(push_dir, 1.6)
@@ -3061,6 +3420,7 @@ func _open_training() -> void:
     enemy.no_fall = true
     _start_fight()
     timer = ROUND_TIME
+    hud.set_opponent_name(Lang.t("dummy"))
     # манекен рядом и не бьёт: бей в своё удовольствие, копи «форму»
     player.reset(Vector3(0, 0, 0.75), 100.0)
     enemy.reset(Vector3(0, 0, -0.35), 110.0)
@@ -3428,16 +3788,160 @@ func _run_careertest() -> void:
     await get_tree().process_frame
     ok = ok and belt == 2 and belt_wins == 3
     print("CAREERTEST поражение: пояс=", belt + 1, " взято=", belt_wins, " (должно 3/10)")
-    # сложность по поясам: здоровье и урон соперника растут
+    # сложность: каждый бой внутри пояса и между поясами сильнее
     var diff_lines: Array = []
     for b in BELTS.size():
         belt = b
-        _reset_fight()
-        diff_lines.append("пояс %d: hp %.0f, урон x%.2f, ИИ %d" % [b + 1, enemy.max_hp,
-                enemy.dmg_mult, ai_skill])
+        for w in [0, 4, 9]:
+            belt_wins = w
+            _reset_fight()
+            diff_lines.append("пояс %d бой %d: %s · %s · hp %.0f · урон x%.2f · скорость x%.2f" % [
+                    b + 1, w + 1, String(opp.get("name", "")),
+                    String(_opp_style().get("ru", "")), enemy.max_hp,
+                    enemy.dmg_mult, enemy.dur_mult])
     for line in diff_lines:
         print("CAREERTEST ", line)
     print("CAREERTEST ", "ок" if ok else "ОШИБКА")
+    get_tree().quit()
+
+
+## Сложность и разнообразие: 60 боёв, рост уровня, имена, стили, цифры.
+func _run_difftest() -> void:
+    no_cash = true
+    demo = true
+    var ok := true
+    var names := {}
+    var styles_seen := {}
+    var prev_level := -1.0
+    var prev_base_hp := 0.0
+    var prev_base_dmg := 0.0
+    var min_hp := 9999.0
+    var max_hp := 0.0
+    var min_dmg := 99.0
+    var max_dmg := 0.0
+    var min_spd := 99.0
+    var max_spd := 0.0
+    var adjacent_same := 0
+    var last_style := -1
+    var belt_avg: Array = []
+    for b in BELTS.size():
+        var sum_hp := 0.0
+        var sum_dmg := 0.0
+        for w in BELT_FIGHTS:
+            belt = b
+            belt_wins = w
+            _reset_fight()
+            var lvl := float(opp.get("level", 0.0))
+            if lvl <= prev_level:
+                ok = false
+            prev_level = lvl
+            var nm := String(opp.get("name", ""))
+            if names.has(nm):
+                ok = false
+                print("DIFFTEST повтор имени: ", nm)
+            names[nm] = true
+            var si := int(opp.get("style_i", 0))
+            styles_seen[si] = true
+            if si == last_style:
+                adjacent_same += 1
+            last_style = si
+            min_hp = minf(min_hp, enemy.max_hp)
+            max_hp = maxf(max_hp, enemy.max_hp)
+            min_dmg = minf(min_dmg, enemy.dmg_mult)
+            max_dmg = maxf(max_dmg, enemy.dmg_mult)
+            min_spd = minf(min_spd, enemy.dur_mult)
+            max_spd = maxf(max_spd, enemy.dur_mult)
+            sum_hp += enemy.max_hp
+            sum_dmg += enemy.dmg_mult
+            var base_hp := 105.0 * (1.0 + 0.65 * lvl)
+            var base_dmg := 0.88 + 0.92 * lvl
+            if base_hp <= prev_base_hp or base_dmg <= prev_base_dmg:
+                ok = false
+            prev_base_hp = base_hp
+            prev_base_dmg = base_dmg
+        belt_avg.append(Vector2(sum_hp / float(BELT_FIGHTS), sum_dmg / float(BELT_FIGHTS)))
+    if names.size() != FIGHT_COUNT:
+        ok = false
+    if styles_seen.size() != STYLES.size():
+        ok = false
+    if adjacent_same != 0:
+        ok = false
+    for i in range(1, belt_avg.size()):
+        if belt_avg[i].x <= belt_avg[i - 1].x or belt_avg[i].y <= belt_avg[i - 1].y:
+            ok = false
+    print("DIFFTEST боёв=", FIGHT_COUNT, " имён=", names.size(), " стилей=", styles_seen.size(),
+            " подряд_одинаковых=", adjacent_same)
+    print("DIFFTEST рост: hp %.0f→%.0f, урон x%.2f→x%.2f, скорость x%.2f→x%.2f" % [
+            min_hp, max_hp, min_dmg, max_dmg, min_spd, max_spd])
+    var belt_lines: Array = []
+    for i in belt_avg.size():
+        belt_lines.append("пояс %d: средний hp %.0f, средний урон x%.2f" % [
+                i + 1, belt_avg[i].x, belt_avg[i].y])
+    for line in belt_lines:
+        print("DIFFTEST ", line)
+    # таблица «сколько чистых ударов до нокаута» в конце пояса
+    for b in [0, 2, 4, 5]:
+        belt = b
+        belt_wins = BELT_FIGHTS - 1
+        var row := "пояс %d: " % (b + 1)
+        for prof in [{"power": 0, "speed": 0, "stamina": 0, "guard": 0, "health": 0},
+                {"power": 4, "speed": 4, "stamina": 4, "guard": 4, "health": 4}]:
+            upg = prof
+            _apply_upgrades()
+            _reset_fight()
+            var p_hits: int = ceili(enemy.max_hp
+                    / (11.0 * player.dmg_mult * enemy.taken_mult))
+            var e_hits: int = ceili(player.max_hp
+                    / (11.0 * enemy.dmg_mult * player.taken_mult))
+            row += "ты %d / он %d   " % [p_hits, e_hits]
+        print("DIFFTEST ", row)
+    upg = {"power": 0, "speed": 0, "stamina": 0, "guard": 0, "health": 0}
+    _apply_upgrades()
+    print("DIFFTEST ", "ок" if ok else "ОШИБКА")
+    get_tree().quit()
+
+
+## Реальный бой автопилота против ИИ: видно, что без прокачки карьера не тянется.
+func _run_balancetest() -> void:
+    no_cash = true
+    demo = true
+    autoplay = true
+    no_ai = false
+    var profiles := [
+        {"name": "без прокачки", "upg": {"power": 0, "speed": 0, "stamina": 0, "guard": 0, "health": 0}},
+        {"name": "середина", "upg": {"power": 2, "speed": 2, "stamina": 2, "guard": 2, "health": 2}},
+        {"name": "максимум", "upg": {"power": 4, "speed": 4, "stamina": 4, "guard": 4, "health": 4}},
+    ]
+    for p in profiles:
+        upg = p["upg"]
+        _apply_upgrades()
+        var wins := 0
+        var total := 0
+        var line := String(p["name"]) + ": "
+        for b in [0, 2, 4, 5]:
+            var bw := 0
+            for fi in [0, 4, 8]:
+                belt = b
+                belt_wins = fi
+                _start_fight()
+                timer = ROUND_TIME
+                var guard := 0
+                while state == St.FIGHT and guard < 12000:
+                    _tick_fight(1.0 / 30.0)
+                    guard += 1
+                var won: bool = pending == "win" or pending == "ringout" or pending == "timewin"
+                print("BALANCE бой: пояс=", b + 1, " стиль=", String(_opp_style().get("ru", "")),
+                        " итог=", pending, " hp=", int(player.hp), "/", int(enemy.hp),
+                        " t=", int(ROUND_TIME - timer))
+                if won:
+                    wins += 1
+                    bw += 1
+                total += 1
+                state = St.MENU
+                Engine.time_scale = 1.0
+            line += "пояс %d %d/3 · " % [b + 1, bw]
+        print("BALANCETEST ", line, "всего ", wins, "/", total)
+    autoplay = false
     get_tree().quit()
 
 
