@@ -246,8 +246,14 @@ class Pt:
     var damp := 20.0
 
     func spring(dt: float) -> void:
-        v += ((tgt - p) * k - v * damp) * dt
-        p += v * dt
+        # Подшаги: явный Эйлер с жёсткой пружиной (k=520) на длинном кадре
+        # (просадка FPS, тяжёлый кадр на телефоне) разлетается — тело улетает
+        # за пределы ринга. Дробим шаг, чтобы интегрирование оставалось устойчивым.
+        var n := maxi(1, int(ceil(dt * 120.0)))
+        var h := dt / float(n)
+        for i in n:
+            v += ((tgt - p) * k - v * damp) * h
+            p += v * h
 
     func reset(at: Vector3) -> void:
         p = at
@@ -1099,7 +1105,9 @@ func _punch_phases() -> Dictionary:
     else:
         var u := clampf((t01 - hold_end) / maxf(1.0 - hold_end, 0.001), 0.0, 1.0)
         var r := 1.0 - ease(u, 0.75)
-        d["wind"] = 1.0
+        # wind=0: на возврате рука уходит из IK-позы обратно в стойку плавно,
+        # иначе в последнем кадре перчатка прыгает в стойку одним скачком
+        d["wind"] = 0.0
         d["hit"] = r
         d["ext"] = r
         d["back"] = 1.0 - r
@@ -1160,8 +1168,11 @@ func _aim_arm(sh_node: Node3D, aim: Vector3, pole_world: Vector3 = Vector3.ZERO)
 
 
 func _apply_pose(l_sh: Vector3, l_el: float, r_sh: Vector3, r_el: float, k: float,
-        q_l: Variant = null, q_r: Variant = null) -> void:
+        q_l: Variant = null, q_r: Variant = null, arm_k: float = -1.0) -> void:
     var s := clampf(k, 0.0, 1.0)
+    # рука на ударе догоняет IK-позу быстрее: иначе на контактном кадре перчатка
+    # отстаёт от цели на 20-30 см и удар визуально «не достаёт»
+    var sk := s if arm_k < 0.0 else clampf(arm_k, 0.0, 1.0)
     # удар закончился: сначала подхватываем текущий кватернион, потом сглаживаем
     # в стойку — иначе в последнем кадре рука рывком прыгает назад
     if q_l == null and _pq_l_on:
@@ -1177,6 +1188,10 @@ func _apply_pose(l_sh: Vector3, l_el: float, r_sh: Vector3, r_el: float, k: floa
     var tr := _t_r_sh.lerp(r_sh, s)
     var el := lerpf(_t_l_el, l_el, s)
     var er := lerpf(_t_r_el, r_el, s)
+    if q_l != null:
+        el = lerpf(_t_l_el, l_el, sk)
+    if q_r != null:
+        er = lerpf(_t_r_el, r_el, sk)
 
     wob_el_l.kick(Vector3(-(el - _t_l_el) * 1.2, 0.0, 0.0))
     wob_el_r.kick(Vector3(-(er - _t_r_el) * 1.2, 0.0, 0.0))
@@ -1190,14 +1205,14 @@ func _apply_pose(l_sh: Vector3, l_el: float, r_sh: Vector3, r_el: float, k: floa
 
     if q_l != null:
         # удар с прицелом: ведём плечо кватернионом, без углов Эйлера
-        _pq_l = _step_sh_q(sh_l, wob_sh_l, _pq_l, q_l, s, _pq_l_on)
+        _pq_l = _step_sh_q(sh_l, wob_sh_l, _pq_l, q_l, sk, _pq_l_on)
         _pq_l_on = true
     else:
         _pq_l_on = false
         wob_sh_l.kick(-dl * 1.45)
         sh_l.rotation = tl + wob_sh_l.step(_dt, 110.0, 8.0)
     if q_r != null:
-        _pq_r = _step_sh_q(sh_r, wob_sh_r, _pq_r, q_r, s, _pq_r_on)
+        _pq_r = _step_sh_q(sh_r, wob_sh_r, _pq_r, q_r, sk, _pq_r_on)
         _pq_r_on = true
     else:
         _pq_r_on = false
@@ -1365,7 +1380,13 @@ func _animate(dt: float) -> void:
             q_r = want
             r_el = el_t
 
-    _apply_pose(l_sh, l_el, r_sh, r_el, k, q_l, q_r)
+    var arm_k := -1.0
+    if has_aim:
+        # на выносе рука догоняет цель быстро (контактный кадр точный), на замахе
+        # и возврате — обычное сглаживание, чтобы не дёргалось
+        arm_k = clampf(maxf(k, clampf(float(pun_d["ext"]), 0.0, 1.0) * 0.85), 0.0, 1.0)
+
+    _apply_pose(l_sh, l_el, r_sh, r_el, k, q_l, q_r, arm_k)
 
     # --- вспышка / телеграф
     var e := clampf(flash * 3.0, 0.0, 1.0)
