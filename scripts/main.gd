@@ -290,6 +290,8 @@ var combo := 0
 var comboTimer := 0.0
 var ko_timer := 0.0
 var ko_visual := false
+## отладка: остановить симуляцию в _process (раскадровка поз вручную)
+var freeze_sim := false
 var pending := ""
 var result_bonus := 0
 var high_score := 0
@@ -332,6 +334,34 @@ var coin_gain := 0
 @export var points_loss_on_defeat: int = 40
 var defeat_penalty := 0
 var defeat_penalty_applied := false
+
+## --- нокдаун: сколько раз можно упасть, сколько секунд даётся на подъём и
+## сколько здоровья возвращается после каждого подъёма.
+## Что делать, если игрок не встал за отведённое время.
+enum TimeoutAction { DEFEAT, AUTO_GET_UP }
+## сколько нокдаунов выдерживает боец: пока меньше — падает, когда счётчик
+## дошёл до предела — поражение по существующей логике
+@export var max_knockdowns: int = 3
+## секунд на подъём после «downed» (во время падения таймер не тикает)
+@export var get_up_time_limit: float = 10.0
+## доля здоровья от максимума после 1-го, 2-го, 3-го подъёма
+@export var restore_ratios: Array[float] = [0.5, 0.35, 0.2]
+## i-frames на падение и подъём: удары в это время не проходят
+@export var knockdown_invulnerable: bool = true
+## поведение по истечении времени на подъём
+@export var on_timeout: TimeoutAction = TimeoutAction.DEFEAT
+## соперник встаёт сам; задержка его подъёма (у игрока — свой таймер и Space)
+@export var enemy_get_up_delay: float = 2.0
+
+## Таймер подъёма: создаётся в _ready, стартует только в состоянии «downed».
+var get_up_timer: Timer
+## кто сейчас лежит и ждёт подъёма
+var downed_active := false
+var downed_who: Node3D = null
+## таймер уже истёк, но поражение ещё не засчитано: даём кадру шанс на Space
+var get_up_timeout_pending := false
+## сколько секунд осталось лежать (для подсказки на экране)
+var get_up_remaining := 0.0
 ## Буфер ввода удара: короткое окно, чтобы нажатие во время удара не терялось.
 var punch_buf := ""
 var punch_buf_body := false
@@ -389,6 +419,9 @@ var save_test := false
 var coach_test := false
 var story_test := false
 var touch_test := false
+var knock_test := false
+## раскадровка нокдауна: --knockshot=<префикс> сохраняет кадры падения/подъёма
+var knock_shot := ""
 
 var ai := {"state": "wait", "t": 0.8, "pending": "jab"}
 var player_move := Vector3.ZERO
@@ -466,6 +499,13 @@ func _ready() -> void:
         lang_code = "en" if lang_override == "en" else "ru"
     Lang.set_code(lang_code)
     _setup_input()
+    # таймер на подъём: one_shot, стартует только когда боец уже лежит (downed)
+    get_up_timer = Timer.new()
+    get_up_timer.name = "GetUpTimer"
+    get_up_timer.one_shot = true
+    get_up_timer.wait_time = maxf(get_up_time_limit, 0.1)
+    get_up_timer.timeout.connect(_on_get_up_timer_timeout)
+    add_child(get_up_timer)
     _build_world()
 
     player = FighterScript.new()
@@ -476,6 +516,9 @@ func _ready() -> void:
     player.impact.connect(_on_player_impact)
     player.footstep.connect(_on_step)
     player.knocked_down.connect(_on_knockdown.bind(player))
+    player.knockdown_started.connect(_on_knockdown_started.bind(player))
+    player.downed.connect(_on_downed.bind(player))
+    player.get_up_finished.connect(_on_get_up_finished.bind(player))
 
     enemy = FighterScript.new()
     enemy.name = "Enemy"
@@ -486,6 +529,9 @@ func _ready() -> void:
     enemy.impact.connect(_on_enemy_impact)
     enemy.footstep.connect(_on_step)
     enemy.knocked_down.connect(_on_knockdown.bind(enemy))
+    enemy.knockdown_started.connect(_on_knockdown_started.bind(enemy))
+    enemy.downed.connect(_on_downed.bind(enemy))
+    enemy.get_up_finished.connect(_on_get_up_finished.bind(enemy))
 
     _reset_fight()
     # заставка для меню: один отрендеренный кадр, рисуем его один раз при запуске
@@ -532,6 +578,10 @@ func _ready() -> void:
         _run_storytest()
     if touch_test:
         _run_touchtest()
+    if knock_test:
+        _run_knocktest()
+    if knock_shot != "":
+        _run_knockshot()
 
 
 func _run_selftest() -> void:
@@ -757,6 +807,14 @@ func _parse_args() -> void:
             points_loss_on_defeat = maxi(0, int(a.substr(10)))
         elif a == "--punchtest":
             punch_test = true
+        elif a == "--knocktest":
+            knock_test = true
+        elif a.begins_with("--knockshot="):
+            knock_shot = a.substr(12)
+        elif a.begins_with("--getup="):
+            get_up_time_limit = maxf(0.5, float(a.substr(8)))
+        elif a.begins_with("--timeout="):
+            on_timeout = TimeoutAction.AUTO_GET_UP if a.substr(10) == "auto" else TimeoutAction.DEFEAT
 
 
 # ---------------------------------------------------------------- сцена
@@ -839,6 +897,7 @@ func _build_world() -> void:
         touch.body_mode = touch_body
         touch.dodge.connect(_on_touch_dodge)
         touch.pause_pressed.connect(_on_touch_pause)
+        touch.getup.connect(_on_touch_getup)
         print("TOUCH включено: тач=", DisplayServer.is_touchscreen_available(),
                 " мобилка=", OS.has_feature("mobile"))
 
@@ -1534,11 +1593,26 @@ func _reset_fight() -> void:
     punch_buf = ""
     punch_buf_body = false
     punch_buf_t = 0.0
+    # нокдаун обнуляется на старте боя: счётчик живёт внутри одного боя
+    get_up_timer.stop()
+    downed_active = false
+    downed_who = null
+    get_up_timeout_pending = false
+    get_up_remaining = 0.0
+    hud.set_downed(false)
+    hud.set_hp_dim(false)
+    hud.reset_hp_anim()
+    if touch_ui and touch != null:
+        touch.set_downed(false)
     ai = {"state": "wait", "t": 0.9, "pending": "jab", "combo": 0, "counter_ok": false}
     player.preview = false
     player.reset(Vector3(0, 0, 1.9), 100.0)
+    player.knockdown_invulnerable = knockdown_invulnerable
     # соперник свой на каждый бой: уровень, стиль, имя и внешность
     _apply_opponent()
+    enemy.knockdown_invulnerable = knockdown_invulnerable
+    enemy.get_up_duration = player.get_up_duration
+    enemy.fall_hold = player.fall_hold
     _face_each_other()
     _refresh_hud()
 
@@ -1693,10 +1767,18 @@ func _set_state(s: int) -> void:
             hud.set_training(training, form)
             sfx.music_volume(-13.0)
             sfx.music_pause(false)
+            # вернулись с паузы во время нокдауна — отсчёт продолжается
+            if downed_active and get_up_timer != null and get_up_timer.is_stopped() \
+                    and get_up_remaining > 0.0:
+                get_up_timer.start(maxf(get_up_remaining, 0.1))
         St.PAUSE:
             hud.show_pause()
             sfx.music_pause(true)
             _save_profile()
+            # на паузе не проигрываем нокдаун: таймер замирает и продолжится
+            if downed_active and get_up_timer != null:
+                get_up_remaining = get_up_timer.time_left
+                get_up_timer.stop()
         St.KO:
             if ko_visual:
                 hud.show_ko(ko_text)
@@ -1766,6 +1848,13 @@ func _process(delta: float) -> void:
     # хит-стоп: на попадании мир замирает на пару кадров — удар чувствуется весомее
     if hitstop > 0.0 and (state == St.FIGHT or state == St.TRAINING):
         hitstop = maxf(0.0, hitstop - delta)
+        _update_hud()
+        _update_camera(delta)
+        _check_shot()
+        return
+
+    # отладочная раскадровка: кадр рисуем, симуляцию не двигаем
+    if freeze_sim:
         _update_hud()
         _update_camera(delta)
         _check_shot()
@@ -1964,6 +2053,7 @@ func _tick_fight(delta: float) -> void:
 
     player.tick(delta)
     enemy.tick(delta)
+    _tick_knockdown(delta)
     if training:
         # манекен не падает и не кончается: здоровье возвращается, его тянет назад
         enemy.hp = enemy.max_hp
@@ -1988,7 +2078,12 @@ func _tick_fight(delta: float) -> void:
     if training:
         hud.set_training(true, form)
     elif timer <= 0.0:
-        _end_by_time()
+        # время вышло, пока боец лежит: подняться он уже не успел — это
+        # поражение (или победа, если лежит соперник), а не решение по очкам
+        if downed_active:
+            _end_fight("lose" if downed_who == player else "win", true)
+        else:
+            _end_by_time()
 
 
 
@@ -2149,8 +2244,9 @@ func _read_move() -> Vector3:
 func _player_input(delta: float) -> void:
     if autoplay:
         return
-    if player.ko:
+    if player.ko or player.fallen or player.is_down():
         player_move = Vector3.ZERO
+        player.blocking = false
         return
     if Input.is_action_pressed("dodge") and not player.evading and player.stun <= 0.001:
         player.try_dodge()
@@ -2491,7 +2587,8 @@ func _do_body_action(id: String) -> void:
 func _on_touch_dodge() -> void:
     if (state != St.FIGHT and state != St.TRAINING) or player == null:
         return
-    if not player.evading and player.stun <= 0.001 and not player.ko:
+    if not player.evading and player.stun <= 0.001 and not player.ko \
+            and not player.fallen and not player.is_down():
         player.try_dodge()
 
 
@@ -2500,6 +2597,12 @@ func _on_touch_pause() -> void:
         _set_state(St.PAUSE)
     elif state == St.PAUSE:
         _set_state(St.FIGHT)
+
+
+## «ВСТАТЬ» на мобилке: та же ветка, что Space на клавиатуре.
+func _on_touch_getup() -> void:
+    if downed_active and downed_who == player:
+        _start_get_up(player)
 
 
 # ---------------------------------------------------------------- управление
@@ -2538,6 +2641,16 @@ func _apply_input_map() -> void:
         cev.keycode = int(keys.get(base_id, 0))
         cev.ctrl_pressed = true
         InputMap.action_add_event(bid, cev)
+
+    # Подъём после нокдауна. Действие фиксированное (Space, физическая клавиша)
+    # и не входит в настройку клавиш: Space в бою больше ничем не занят, в
+    # меню он остаётся «подтвердить». Сработает только в состоянии downed.
+    if not InputMap.has_action("get_up"):
+        InputMap.add_action("get_up")
+    InputMap.action_erase_events("get_up")
+    var gev := InputEventKey.new()
+    gev.physical_keycode = KEY_SPACE
+    InputMap.action_add_event("get_up", gev)
 
 
 func _save_keys() -> void:
@@ -2762,10 +2875,173 @@ func _on_knockdown(who: Node3D) -> void:
         score += 60
 
 
+# ---------------------------------------------------------------- нокдаун
+
+## Боец начал падать. Управление и текущие действия сбрасываем сразу, но
+## подсказку и таймер не включаем: они ждут состояния «downed».
+func _on_knockdown_started(who: Node3D) -> void:
+    if state != St.FIGHT and state != St.TRAINING:
+        return
+    knock_cooldown_done()
+    punch_buf = ""
+    punch_buf_body = false
+    punch_buf_t = 0.0
+    if who == player:
+        combo = 0
+        comboTimer = 0.0
+        chain = 0
+        chain_t = 0.0
+        player.blocking = false
+        hud.set_hp_dim(true)
+        hud.animate_hp(0.0, true, 0.25)
+    else:
+        enemy.blocking = false
+        ai["state"] = "wait"
+        ai["t"] = 1.4
+
+
+## Тело осело: только теперь тикает таймер и видна подсказка «Space — встать».
+func _on_downed(who: Node3D) -> void:
+    if state != St.FIGHT and state != St.TRAINING:
+        return
+    if downed_active:
+        return
+    downed_active = true
+    downed_who = who
+    get_up_timeout_pending = false
+    get_up_remaining = 0.0
+    if who == player:
+        get_up_remaining = maxf(get_up_time_limit, 0.1)
+        get_up_timer.wait_time = get_up_remaining
+        get_up_timer.start()
+        hud.set_downed(true, Lang.t("get_up_hint_touch") if touch_ui else Lang.t("get_up_hint"))
+        hud.set_downed_time(get_up_remaining)
+        if touch_ui and touch != null:
+            touch.set_downed(true)
+        sfx.play("gasp", 1.05, -10.0)
+    else:
+        # соперник поднимается сам: у него нет кнопки, но есть своя задержка
+        get_up_remaining = maxf(enemy_get_up_delay, 0.1)
+        knockdown_show = 1.2
+
+
+## Сигнал Timer. Поражение здесь НЕ засчитываем: в этом же кадре игрок мог
+## нажать Space, и приоритет отдаётся подъёму (проверка в _tick_knockdown).
+func _on_get_up_timer_timeout() -> void:
+    get_up_timeout_pending = true
+
+
+## Покадровая часть нокдауна: ввод → таймер → отсчёт в UI.
+func _tick_knockdown(delta: float) -> void:
+    if not downed_active or downed_who == null:
+        return
+    # 1. Space поднимает только из «downed» (во время падения кнопка молчит).
+    # Проверяем ДО обработки таймаута — приоритет у подъёма.
+    if downed_who == player and Input.is_action_just_pressed("get_up"):
+        _start_get_up(player)
+        return
+    # автопилот/демо-бой встаёт сам: иначе любой бой кончался бы таймаутом
+    if downed_who == player and autoplay:
+        _start_get_up(player)
+        return
+    # 2. таймер истёк
+    if get_up_timeout_pending or (downed_who == player and get_up_timer.time_left <= 0.0):
+        _on_get_up_deadline()
+        return
+    # соперник встаёт сам по своей задержке
+    if downed_who == enemy:
+        get_up_remaining = maxf(0.0, get_up_remaining - delta)
+        if get_up_remaining <= 0.0:
+            _start_get_up(enemy)
+        return
+    # 3. отсчёт на экране
+    get_up_remaining = get_up_timer.time_left
+    hud.set_downed_time(get_up_remaining)
+
+
+## Подъём: таймер стоп, подсказка убрана, дальше играет анимация get_up.
+func _start_get_up(who: Node3D) -> void:
+    if not downed_active or downed_who != who:
+        return
+    get_up_timer.stop()
+    get_up_timeout_pending = false
+    _clear_downed()
+    if not who.begin_get_up():
+        # страховка: анимация не стартовала — боец не должен остаться лежать
+        who.knock_state = FighterScript.KnockState.FALLING
+        who.knock_t = 0.0
+
+
+func _clear_downed() -> void:
+    downed_active = false
+    downed_who = null
+    get_up_remaining = 0.0
+    hud.set_downed(false)
+    if touch_ui and touch != null:
+        touch.set_downed(false)
+
+
+## Время вышло: игрок не встал — поражение (или автоподъём, если настроено).
+func _on_get_up_deadline() -> void:
+    var who: Node3D = downed_who
+    get_up_timer.stop()
+    get_up_timeout_pending = false
+    _clear_downed()
+    if who == null:
+        return
+    if who == player and on_timeout == TimeoutAction.DEFEAT:
+        # не встал — поражение по существующей логике; штраф спишется один раз
+        # во _finalize (защита defeat_penalty_applied)
+        _end_fight("lose", true)
+        return
+    # AUTO_GET_UP или соперник: поднимаем, HP вернётся по общим правилам
+    if not who.begin_get_up():
+        who.knock_state = FighterScript.KnockState.FALLING
+        who.knock_t = 0.0
+
+
+## Подъём доигран: возвращаем здоровье по restore_ratios и управление.
+func _on_get_up_finished(who: Node3D) -> void:
+    var idx := mini(maxi(int(who.knockdown_count) - 1, 0), restore_ratios.size() - 1)
+    var ratio := 0.5
+    if restore_ratios.size() > 0:
+        ratio = clampf(float(restore_ratios[maxi(idx, 0)]), 0.05, 1.0)
+    who.hp = who.max_hp * ratio
+    who.stamina = maxf(who.stamina, who.max_stamina * 0.5)
+    who.ko = false
+    hud.animate_hp(ratio, who == player, 0.5)
+    if who == player:
+        hud.set_hp_dim(false)
+        # короткое окно: соперник не бросается сразу после подъёма
+        knock_cooldown_done()
+        ai["state"] = "wait"
+        ai["t"] = 1.0
+        print("GETUP подъём: нокдаун=", who.knockdown_count, " hp=", snappedf(who.hp, 0.1),
+                " доля=", ratio)
+    else:
+        ai["state"] = "wait"
+        ai["t"] = 0.7
+        print("GETUP соперник встал: нокдаун=", who.knockdown_count,
+                " hp=", snappedf(who.hp, 0.1), " доля=", ratio)
+
+
+## Сброс комбо/агрессии на короткое окно после нокдауна.
+func knock_cooldown_done() -> void:
+    combo = 0
+    comboTimer = 0.0
+    chain = 0
+    chain_t = 0.0
+    punch_buf = ""
+    punch_buf_body = false
+    punch_buf_t = 0.0
+
+
 func _resolve(att: Node3D, def: Node3D, kind: String) -> void:
     if state != St.FIGHT and state != St.TRAINING:
         return
     if def.ko or def.fallen or att.fallen:
+        return
+    if knockdown_invulnerable and def.has_method("is_invulnerable") and def.is_invulnerable():
         return
     var p: Dictionary = att.punch_info(kind)
     var body_punch: bool = kind.begins_with("body_")
@@ -2809,6 +3085,9 @@ func _resolve(att: Node3D, def: Node3D, kind: String) -> void:
             combo += 1
             comboTimer = 2.6
             score += int(round(float(p["score"]) * 0.3))
+        # блок тоже пропускает часть урона: если его хватило до нуля — нокдаун
+        if def.hp <= 0.0 and hp_before > 0.0 and not training:
+            _hp_zero(def, att, push_dir, anim_kind)
         _clamp_ring(def)
         return
 
@@ -2871,11 +3150,20 @@ func _resolve(att: Node3D, def: Node3D, kind: String) -> void:
         combo = 0
 
     if def.hp <= 0.0 and hp_before > 0.0 and not training:
-        def.hp = 0.0
+        _hp_zero(def, att, push_dir, anim_kind)
+
+
+## Здоровье на нуле: нокдаун, пока не кончились попытки, иначе — поражение.
+## Вызывается и после обычного попадания, и после блока.
+func _hp_zero(def: Node3D, att: Node3D, push_dir: Vector3, anim_kind: String) -> void:
+    def.hp = 0.0
+    # физический ragdoll: тело падает по-настоящему
+    var imp: Vector3 = push_dir * (2.6 if anim_kind == "upper" else 1.9)
+    imp += Vector3(0.0, 1.9 if anim_kind == "upper" else 1.4, 0.0)
+    if int(def.knockdown_count) < max_knockdowns and not def.ko:
+        def.start_knockdown(imp)
+    else:
         def.ko = true
-        # физический ragdoll: тело падает по-настоящему
-        var imp: Vector3 = push_dir * (2.6 if anim_kind == "upper" else 1.9)
-        imp += Vector3(0.0, 1.9 if anim_kind == "upper" else 1.4, 0.0)
         if def.has_method("enter_ragdoll"):
             def.enter_ragdoll(imp)
         _end_fight("win" if att == player else "lose", true)
@@ -3049,11 +3337,18 @@ func _distance() -> float:
 func _face_each_other() -> void:
     if not player or not enemy:
         return
-    player.look_at_target(enemy.position)
-    enemy.look_at_target(player.position)
+    # лежащего/нокаутированного не разворачиваем: поворот корня провернул бы
+    # тело на полу
+    if not player.fallen and not player.ko and not player.is_down():
+        player.look_at_target(enemy.position)
+    if not enemy.fallen and not enemy.ko and not enemy.is_down():
+        enemy.look_at_target(player.position)
 
 
 func _separate(delta: float) -> void:
+    # пока кто-то лежит, толкаться нечем: ragdoll и так на полу
+    if player.fallen or player.ko or enemy.fallen or enemy.ko:
+        return
     var d := _distance()
     if d > 0.001 and d < MIN_GAP:
         var dir := enemy.position - player.position
@@ -4751,6 +5046,359 @@ func _tick_until_idle() -> void:
         _tick_fight(1.0 / 60.0)
         if player.punch_kind == "" and player.stun <= 0.001:
             break
+
+
+# ---------------------------------------------------------------- нокдаун: тесты
+
+## Прокрутить бой без рендера.
+func _knock_advance(seconds: float) -> void:
+    var n := maxi(1, int(ceil(seconds * 60.0)))
+    for i in n:
+        _tick_fight(1.0 / 60.0)
+
+
+## Прокрутить реальное время: Timer отсчитывает только в кадрах движка,
+## поэтому таймаут подъёма проверяем через настоящие кадры.
+func _knock_advance_real(seconds: float) -> void:
+    var until := Time.get_ticks_msec() + int(seconds * 1000.0)
+    while Time.get_ticks_msec() < until:
+        await get_tree().process_frame
+
+
+## Ждать нужного состояния нокдауна у игрока; -1.0 — не дождались.
+func _knock_wait_player(want: int, limit: float) -> float:
+    var t := 0.0
+    while t < limit:
+        if int(player.knock_state) == want:
+            return t
+        _tick_fight(1.0 / 60.0)
+        t += 1.0 / 60.0
+    return -1.0
+
+
+## Уронить игрока ударом соперника (HP = 1 → удар → нокдаун).
+func _knock_down_player() -> bool:
+    if player.fallen or player.ko:
+        return false
+    player.position = Vector3(0.0, 0.0, 0.62)
+    enemy.position = Vector3(0.0, 0.0, -0.42)
+    _face_each_other()
+    player.hp = 1.0
+    player.blocking = false
+    player.evading = false
+    player.stun = 0.0
+    enemy.stun = 0.0
+    enemy.blocking = false
+    enemy.evading = false
+    var started: bool = _punch(enemy, player, "jab")
+    var t := _knock_wait_player(FighterScript.KnockState.FALLING, 1.2)
+    return started and t >= 0.0
+
+
+## Нажать Space через Input Map — тем же путём, что живой игрок.
+## Ждём кадр между нажатием и отпусканием: is_action_just_pressed живёт один
+## кадр, иначе нажатие «залипнет» на все следующие проверки в этом же кадре.
+func _knock_press_space() -> void:
+    Input.action_press("get_up")
+    _tick_fight(1.0 / 60.0)
+    await get_tree().process_frame
+    Input.action_release("get_up")
+    await get_tree().process_frame
+
+
+## Уронить соперника: HP = 1 → удар игрока → нокдаун.
+func _knock_down_enemy() -> bool:
+    if enemy.fallen or enemy.ko:
+        return false
+    player.position = Vector3(0.0, 0.0, 0.62)
+    enemy.position = Vector3(0.0, 0.0, -0.42)
+    _face_each_other()
+    enemy.hp = 1.0
+    enemy.blocking = false
+    enemy.evading = false
+    enemy.stun = 0.0
+    player.stun = 0.0
+    player.blocking = false
+    player.evading = false
+    var started: bool = _punch(player, enemy, "jab")
+    var t := 0.0
+    while t < 1.2 and int(enemy.knock_state) == 0:
+        _tick_fight(1.0 / 60.0)
+        t += 1.0 / 60.0
+    return started and int(enemy.knock_state) != 0
+
+
+func _knock_wait_enemy(want: int, limit: float) -> float:
+    var t := 0.0
+    while t < limit:
+        if int(enemy.knock_state) == want:
+            return t
+        _tick_fight(1.0 / 60.0)
+        t += 1.0 / 60.0
+    return -1.0
+
+
+func _run_knocktest() -> void:
+    no_cash = true
+    demo = false
+    var ok := true
+    var lines: Array = []
+
+    # 0. Input Map: действие get_up на Space (физическая клавиша)
+    var has_getup: bool = InputMap.has_action("get_up")
+    var space_ev := false
+    if has_getup:
+        for ev in InputMap.action_get_events("get_up"):
+            if ev is InputEventKey and (ev as InputEventKey).physical_keycode == KEY_SPACE:
+                space_ev = true
+    ok = ok and has_getup and space_ev
+    lines.append("действие get_up=%s, Space(physical)=%s" % [has_getup, space_ev])
+
+    # 1. HP = 0 → не смерть, а падение; атака/уклон/шаг заблокированы
+    get_up_time_limit = 10.0
+    on_timeout = TimeoutAction.DEFEAT
+    _start_fight()
+    no_ai = true
+    _knock_down_player()
+    var falling_ok: bool = int(player.knock_state) == FighterScript.KnockState.FALLING
+    var not_dead: bool = not player.ko and state == St.FIGHT
+    var atk_blocked: bool = not player.start_punch("jab") and not player.try_dodge()
+    var vel0: Vector3 = player.vel
+    player.drive(Vector3(1, 0, 0), 1.0 / 60.0)
+    var move_blocked: bool = player.vel.length() <= vel0.length() + 0.001
+    # i-frames: пока лежит, урон не проходит
+    player.take_hit(25.0, Vector3(0, 0, -1))
+    _resolve(enemy, player, "jab")
+    var iframe_ok: bool = player.hp <= 0.01 and int(player.knockdown_count) == 0
+    ok = ok and falling_ok and not_dead and atk_blocked and move_blocked and iframe_ok
+    lines.append("падение: состояние=падение %s, не_КО=%s, атака_и_уклон_заблок=%s, шаг_заблок=%s, i-frames=%s"
+            % [falling_ok, not_dead, atk_blocked, move_blocked, iframe_ok])
+
+    # 2. «downed»: таймер стартует только теперь, подсказка и отсчёт видны
+    var t_down := _knock_wait_player(FighterScript.KnockState.DOWNED, 3.0)
+    _tick_fight(1.0 / 60.0)
+    var timer_runs: bool = not get_up_timer.is_stopped()
+    var ui_ok: bool = hud.getup_lbl.visible and hud.getup_time_lbl.visible
+    var hint: String = hud.getup_lbl.text
+    var countdown: String = hud.getup_time_lbl.text
+    ok = ok and t_down >= 0.0 and timer_runs and ui_ok and countdown.find(":") >= 0
+    lines.append("downed: через %.2f с, таймер_идёт=%s, подсказка=«%s», отсчёт=«%s»"
+            % [t_down, timer_runs, hint, countdown])
+
+    # 3. Space: таймер стоп, подъём, HP = 50 %, счётчик = 1, управление вернулось
+    await _knock_press_space()
+    var getup_started: bool = int(player.knock_state) == FighterScript.KnockState.GETUP
+    var timer_stopped: bool = get_up_timer.is_stopped()
+    var t_up := _knock_wait_player(FighterScript.KnockState.NONE, 3.0)
+    var hp1: float = player.hp
+    var cnt1: int = int(player.knockdown_count)
+    var control_back: bool = player.start_punch("jab")
+    player.punch_kind = ""
+    ok = ok and getup_started and timer_stopped and t_up >= 0.0 \
+            and absf(hp1 - player.max_hp * float(restore_ratios[0])) < 0.6 \
+            and cnt1 == 1 and control_back
+    lines.append("подъём: старт=%s (за %.2f с), таймер_стоп=%s, HP=%.0f (ждали %.0f), счётчик=%d, управление=%s"
+            % [getup_started, t_up, timer_stopped, hp1,
+                player.max_hp * float(restore_ratios[0]), cnt1, control_back])
+
+    # 4. Второй и третий нокдаун: доля восстановления падает 50 → 35 → 20 %
+    var hp2 := 0.0
+    var hp3 := 0.0
+    for n in [1, 2]:
+        _knock_down_player()
+        _knock_wait_player(FighterScript.KnockState.DOWNED, 3.0)
+        await _knock_press_space()
+        _knock_wait_player(FighterScript.KnockState.NONE, 3.0)
+        if n == 1:
+            hp2 = player.hp
+        else:
+            hp3 = player.hp
+    var ratios_ok: bool = absf(hp2 - player.max_hp * float(restore_ratios[1])) < 0.6 \
+            and absf(hp3 - player.max_hp * float(restore_ratios[2])) < 0.6 \
+            and int(player.knockdown_count) == 3
+    ok = ok and ratios_ok
+    lines.append("доли: 2-й HP=%.0f (ждали %.0f), 3-й HP=%.0f (ждали %.0f), счётчик=%d"
+            % [hp2, player.max_hp * float(restore_ratios[1]), hp3,
+                player.max_hp * float(restore_ratios[2]), int(player.knockdown_count)])
+
+    # 5. Счётчик дошёл до max_knockdowns → поражение по существующей логике
+    _knock_down_player()
+    var ko_ok: bool = player.ko and state == St.KO and pending == "lose"
+    ok = ok and ko_ok
+    lines.append("исчерпание попыток: КО=%s, состояние=КО %s, итог=%s"
+            % [player.ko, state == St.KO, pending])
+
+    # 6. Таймаут DEFEAT: не нажал Space — поражение, штраф один раз
+    get_up_time_limit = 1.0
+    on_timeout = TimeoutAction.DEFEAT
+    _start_fight()
+    no_ai = true
+    _knock_down_player()
+    var t6 := _knock_wait_player(FighterScript.KnockState.DOWNED, 3.0)
+    await _knock_advance_real(1.6)
+    var timeout_ok: bool = pending == "lose" and state == St.KO \
+            and not downed_active and get_up_timer.is_stopped() \
+            and int(player.knock_state) == FighterScript.KnockState.DOWNED
+    # штраф за поражение: идемпотентность (второй вызов ничего не меняет)
+    coins = 1000
+    points_loss_on_defeat = 40
+    defeat_penalty_applied = false
+    defeat_penalty = 0
+    _apply_defeat_penalty()
+    var pen1: int = defeat_penalty
+    var coins1: int = coins
+    _apply_defeat_penalty()
+    var penalty_once: bool = pen1 == 40 and coins1 == 960 and coins == 960 \
+            and defeat_penalty_applied
+    ok = ok and timeout_ok and penalty_once
+    lines.append("таймаут DEFEAT: поражение=%s, таймер_стоп=%s, лежит=%s, штраф_один_раз=%s (%d)"
+            % [timeout_ok, get_up_timer.is_stopped(),
+                int(player.knock_state) == FighterScript.KnockState.DOWNED,
+                penalty_once, pen1])
+
+    # 7. on_timeout = AUTO_GET_UP: встаёт сам, HP по restore_ratios
+    get_up_time_limit = 0.8
+    on_timeout = TimeoutAction.AUTO_GET_UP
+    _start_fight()
+    no_ai = true
+    _knock_down_player()
+    _knock_wait_player(FighterScript.KnockState.DOWNED, 3.0)
+    await _knock_advance_real(2.6)
+    var auto_ok: bool = int(player.knockdown_count) == 1 and state == St.FIGHT \
+            and absf(player.hp - player.max_hp * float(restore_ratios[0])) < 0.6
+    ok = ok and auto_ok
+    lines.append("таймаут AUTO_GET_UP: встал=%s, HP=%.0f, счётчик=%d"
+            % [auto_ok, player.hp, int(player.knockdown_count)])
+
+    # 8. Гонка ввода и таймаута в одном кадре: приоритет у подъёма
+    on_timeout = TimeoutAction.DEFEAT
+    get_up_time_limit = 0.6
+    _start_fight()
+    no_ai = true
+    _knock_down_player()
+    _knock_wait_player(FighterScript.KnockState.DOWNED, 3.0)
+    _knock_advance(0.45)
+    _on_get_up_timer_timeout()          # таймер «выстрелил» в этом же кадре
+    await _knock_press_space()          # но игрок успел нажать Space
+    var race_ok: bool = int(player.knock_state) == FighterScript.KnockState.GETUP \
+            and pending != "lose"
+    _knock_wait_player(FighterScript.KnockState.NONE, 3.0)
+    ok = ok and race_ok
+    lines.append("гонка Space/таймаут: подъём_побеждает=%s, итог=«%s»" % [race_ok, pending])
+
+    # 9. Нокдаун во время атаки и блока: текущее действие сбрасывается
+    on_timeout = TimeoutAction.DEFEAT
+    get_up_time_limit = 10.0
+    _start_fight()
+    no_ai = true
+    player.position = Vector3(0.0, 0.0, 0.62)
+    enemy.position = Vector3(0.0, 0.0, -0.42)
+    _face_each_other()
+    player.blocking = true
+    _punch(player, enemy, "jab")
+    player.hp = 1.0
+    enemy.blocking = false
+    enemy.evading = false
+    enemy.stun = 0.0
+    _punch(enemy, player, "jab")
+    _knock_wait_player(FighterScript.KnockState.FALLING, 1.5)
+    var cancel_ok: bool = player.punch_kind == "" and not player.blocking \
+            and int(player.knock_state) == FighterScript.KnockState.FALLING
+    ok = ok and cancel_ok
+    lines.append("нокдаун во время атаки/блока: удар_сброшен=%s, блок_сброшен=%s"
+            % [player.punch_kind == "", not player.blocking])
+
+    # 10. Соперник падает так же, встаёт сам по enemy_get_up_delay, после
+    # исчерпания попыток — КО и победа игрока
+    _start_fight()
+    no_ai = true
+    var e_down := _knock_down_enemy()
+    var e_t := _knock_wait_enemy(FighterScript.KnockState.DOWNED, 3.0)
+    _knock_advance(maxf(enemy_get_up_delay, 0.2) + 1.6)
+    var enemy_hp1: float = enemy.hp
+    var enemy_ok: bool = e_down and e_t >= 0.0 \
+            and absf(enemy.hp - enemy.max_hp * float(restore_ratios[0])) < 0.6 \
+            and int(enemy.knockdown_count) == 1 and int(enemy.knock_state) == 0
+    for n in [1, 2]:
+        _knock_down_enemy()
+        _knock_wait_enemy(FighterScript.KnockState.DOWNED, 3.0)
+        _knock_advance(maxf(enemy_get_up_delay, 0.2) + 1.6)
+    _knock_down_enemy()
+    var enemy_ko: bool = enemy.ko and pending == "win" and state == St.KO
+    ok = ok and enemy_ok and enemy_ko
+    lines.append("соперник: нокдаун=%s, сам_встал_HP=%.0f, счётчик=%d, после_лимита_КО=%s, итог=«%s»"
+            % [enemy_ok, enemy_hp1, int(enemy.knockdown_count), enemy_ko, pending])
+
+    for l in lines:
+        print("KNOCKTEST ", l)
+    print("KNOCKTEST ок=", ok, " (get_up_time_limit=", get_up_time_limit,
+            ", on_timeout=", on_timeout, ")")
+    get_tree().quit()
+
+
+## Раскадровка нокдауна: падение → лежит → подъём. Кадры <prefix>_00…_06.png
+func _run_knockshot() -> void:
+    demo = true
+    no_cash = true
+    _start_fight()
+    no_ai = true
+    player.position = Vector3(0.10, 0.0, 0.60)
+    enemy.position = Vector3(0.0, 0.0, -0.45)
+    _face_each_other()
+    player.punch_kind = ""
+    player.hp = 1.0
+    enemy.blocking = false
+    # камера сбоку-спереди: видно, как тело падает и встаёт
+    cam.position = Vector3(3.9, 2.35, 4.3)
+    cam.look_at(Vector3(0.0, 0.65, 0.05), Vector3.UP)
+    _punch(enemy, player, "jab")
+    _knock_wait_player(FighterScript.KnockState.FALLING, 1.5)
+    freeze_sim = true
+    var idx := 0
+    _knock_advance(0.25)
+    await _knock_shot("%s_%02d.png" % [knock_shot, idx])
+    idx += 1
+    _knock_advance(0.55)
+    await _knock_shot("%s_%02d.png" % [knock_shot, idx])
+    idx += 1
+    _knock_wait_player(FighterScript.KnockState.DOWNED, 4.0)
+    _knock_advance(0.30)
+    hud.set_downed_time(get_up_timer.time_left)
+    await _knock_shot("%s_%02d.png" % [knock_shot, idx])
+    idx += 1
+    print("KNOCKSHOT лежит: состояние=", player.knock_state,
+            " таймер=", snappedf(get_up_timer.time_left, 0.1),
+            " подсказка=«", hud.getup_lbl.text, "» отсчёт=«", hud.getup_time_lbl.text, "»")
+    print("KNOCKSHOT поза_лежа: quat=", player._down_quat.get_euler().snapped(Vector3(0.01, 0.01, 0.01)),
+            " pos=", player._down_pos.snapped(Vector3(0.01, 0.01, 0.01)),
+            " root=", player.position.snapped(Vector3(0.01, 0.01, 0.01)))
+    _start_get_up(player)
+    var dur: float = player.get_up_duration
+    for frac in [0.2, 0.45, 0.7, 0.9]:
+        player.knock_t = dur * float(frac)
+        player.tick(0.004)
+        hud.set_downed(false)
+        await _knock_shot("%s_%02d.png" % [knock_shot, idx])
+        print("KNOCKSHOT подъём ", int(float(frac) * 100.0), "%: body=",
+                player.body.rotation.snapped(Vector3(0.01, 0.01, 0.01)),
+                " body_pos=", player.body.position.snapped(Vector3(0.01, 0.01, 0.01)),
+                " hips_y=", snappedf(player.hips.position.y, 0.01))
+        idx += 1
+    player.knock_t = dur
+    player.tick(0.004)
+    await _knock_shot("%s_%02d.png" % [knock_shot, idx])
+    print("KNOCKSHOT встал: состояние=", player.knock_state, " hp=", snappedf(player.hp, 0.1),
+            " счётчик=", player.knockdown_count)
+    get_tree().quit()
+
+
+func _knock_shot(path: String) -> void:
+    for i in 2:
+        await get_tree().process_frame
+    await RenderingServer.frame_post_draw
+    var img := get_viewport().get_texture().get_image()
+    var err := img.save_png(path)
+    print("KNOCKSHOT ", path, " err=", err, " размер=", img.get_size())
 
 
 func _take_shot() -> void:

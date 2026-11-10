@@ -9,9 +9,14 @@ extends CanvasLayer
 signal punch(kind: String)
 signal dodge()
 signal pause_pressed()
+## нажата большая кнопка «ВСТАТЬ» — она видна только в нокдауне
+signal getup()
 
 const W := 1280.0
 const H := 720.0
+## кнопка подъёма: по центру, между стиком и ударами
+const GETUP_POS := Vector2(640.0, 470.0)
+const GETUP_R := 88.0
 
 const AMBER := Color(0.98, 0.75, 0.14)
 const TEXT := Color(0.94, 0.96, 1.0)
@@ -41,6 +46,8 @@ var move := Vector2.ZERO
 var block := false
 ## переключатель «бить в корпус»: пока включён, все удары идут по корпусу
 var body_mode := false
+## боец лежит: показываем кнопку «ВСТАТЬ» (на мобилке нет Space)
+var downed := false
 
 var pad: Control
 var font: SystemFont
@@ -71,6 +78,7 @@ func build() -> void:
 func set_active(on: bool) -> void:
     active = on
     body_mode = false
+    downed = false
     if pad != null:
         pad.visible = on
         pad.mouse_filter = Control.MOUSE_FILTER_STOP if on else Control.MOUSE_FILTER_IGNORE
@@ -82,6 +90,15 @@ func set_active(on: bool) -> void:
             _held.clear()
             _block_id = -1
             _hot.clear()
+        pad.queue_redraw()
+
+
+## Показать/убрать кнопку подъёма (её включает main.gd по сигналу downed).
+func set_downed(on: bool) -> void:
+    downed = on
+    if not on:
+        _hot.erase("getup")
+    if pad != null and active:
         pad.queue_redraw()
 
 
@@ -107,6 +124,14 @@ func _on_gui_input(event: InputEvent) -> void:
     if event is InputEventScreenTouch:
         var t := event as InputEventScreenTouch
         if t.pressed:
+            # в нокдауне единственное действие — встать, остальное не работает
+            if downed:
+                if t.position.distance_to(GETUP_POS) <= GETUP_R + 16.0:
+                    _hot["getup"] = true
+                    getup.emit()
+                    pad.queue_redraw()
+                pad.accept_event()
+                return
             var b := _btn_at(t.position)
             if not b.is_empty():
                 var id := String(b["id"])
@@ -204,6 +229,11 @@ func _stick_update(p: Vector2) -> void:
 func _draw_pad() -> void:
     if not active:
         return
+    # в нокдауне оставляем на экране только кнопку «ВСТАТЬ»: удары, блок,
+    # уклон и стик всё равно не работают — нечего и показывать
+    if downed:
+        _draw_getup()
+        return
     # удары и вспомогательные кнопки
     for b in BTN:
         var id := String(b["id"])
@@ -236,3 +266,18 @@ func _draw_pad() -> void:
     var knob := STICK_POS + _stick_vec * (STICK_R - KNOB_R)
     pad.draw_circle(knob, KNOB_R, Color(0.98, 0.75, 0.14, 0.30))
     pad.draw_arc(knob, KNOB_R, 0.0, TAU, 32, AMBER, 3.0, true)
+
+
+## Большая кнопка «ВСТАТЬ»: пульсирует, чтобы её было видно сразу.
+func _draw_getup() -> void:
+    var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() * 0.006)
+    var hot := bool(_hot.get("getup", false))
+    pad.draw_circle(GETUP_POS, GETUP_R, Color(0.98, 0.75, 0.14, 0.30 + 0.22 * pulse))
+    pad.draw_arc(GETUP_POS, GETUP_R, 0.0, TAU, 56, AMBER, 4.0, true)
+    pad.draw_arc(GETUP_POS, GETUP_R - 10.0, 0.0, TAU, 48,
+            Color(0.99, 0.90, 0.52, 0.75 if hot else 0.45 + 0.35 * pulse), 2.0, true)
+    var label := "ВСТАТЬ"
+    var size := 30
+    var tw := font_b.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+    pad.draw_string(font_b, GETUP_POS + Vector2(-tw * 0.5, size * 0.36), label,
+            HORIZONTAL_ALIGNMENT_LEFT, -1, size, TEXT)
