@@ -6,6 +6,13 @@ extends Node3D
 signal impact(kind)
 signal footstep(power)
 signal knocked_down
+## Нокдаун по здоровью: тело падает, лежит и ждёт решения (подъём / поражение).
+## knocked_down — общий «упал» (в т.ч. от потери баланса), эти сигналы — только
+## про настоящий нокдаун по HP.
+signal knockdown_started
+signal downed
+signal get_up_started
+signal get_up_finished
 
 const LookScript = preload("res://scripts/look.gd")
 
@@ -243,6 +250,28 @@ var down_t := 0.0
 const MAX_SPEED := 3.2
 const ACCEL := 12.0
 const FALL_TILT := 0.95
+
+# --- нокдаун по здоровью. Проект полностью процедурный: AnimationTree и
+# AnimationPlayer здесь нет, поэтому состояния сделаны явным автоматом —
+# он же играет роль, которую в обычном проекте выполняет travel():
+#   knockdown (падение) → downed (лежит, ждёт решения) → get_up (подъём) → NONE
+# Управляет переходами main.gd: падение — когда HP дошло до нуля, подъём — по
+# Space (у игрока) или таймером, поражение — когда нокдауны кончились.
+enum KnockState { NONE, FALLING, DOWNED, GETUP }
+## во время падения/лежания/подъёма удары не проходят
+@export var knockdown_invulnerable := true
+## сколько секунд тело лежит, прежде чем начнётся «downed» (таймер подъёма
+## стартует именно с этого момента, а не с падения)
+@export var fall_hold := 0.9
+## длительность процедурной анимации подъёма
+@export var get_up_duration := 1.15
+var knock_state: int = KnockState.NONE
+var knock_t := 0.0
+## сколько раз боец уже поднялся после нокдауна в этом бою
+var knockdown_count := 0
+## поза лежа: поворот и смещение тела, снятые с ragdoll в момент «downed»
+var _down_quat := Quaternion.IDENTITY
+var _down_pos := Vector3.ZERO
 
 # --- активный ragdoll: точки-массы + мышцы-пружины + физические шаги
 ## Тело больше не «рисует» позу: таз, корпус, голова и стопы — это точки с
@@ -640,6 +669,10 @@ func try_dodge() -> bool:
 
 
 func take_hit(dmg: float, push: Vector3) -> void:
+    # i-frames: пока лежим или встаём, урон не проходит (даже если main.gd
+    # забыл проверить состояние)
+    if is_invulnerable():
+        return
     dmg *= taken_mult
     hp = maxf(0.0, hp - dmg)
     taken += dmg
@@ -702,7 +735,7 @@ func turn_lean(v: Vector2) -> void:
 
 ## Принудительное падение (нокдаун от удара): тело улетает физически.
 func force_fall(dir: Vector3, power: float) -> void:
-    if ko or fallen:
+    if ko or fallen or knock_state != KnockState.NONE:
         return
     var d := Vector3(dir.x, 0.0, dir.z)
     if d.length() < 0.01:
@@ -754,6 +787,11 @@ func reset(spawn: Vector3, hp_value: float) -> void:
     tilt_vel = Vector2.ZERO
     fallen = false
     down_t = 0.0
+    knock_state = KnockState.NONE
+    knock_t = 0.0
+    knockdown_count = 0
+    _down_quat = Quaternion.IDENTITY
+    _down_pos = Vector3.ZERO
     wob_sh_l.clear()
     wob_sh_r.clear()
     wob_el_l.clear()
@@ -821,14 +859,30 @@ func tick(dt: float) -> void:
     stamina = clampf(stamina + regen * stam_mult * dt, 0.0, max_stamina)
 
     if fallen:
-        down_t -= dt
         # тело «приезжает» туда, где осел ragdoll, чтобы не телепортироваться
         if ragdoll_parts.has("pelvis"):
             var prb: RigidBody3D = ragdoll_parts["pelvis"]
             position.x = prb.global_position.x
             position.z = prb.global_position.z
-        if down_t <= 0.0 and not ko:
-            _get_up()
+        if knock_state != KnockState.NONE:
+            # настоящий нокдаун: сам не встаём — решение принимает main.gd
+            if knock_state == KnockState.FALLING:
+                knock_t += dt
+                # «downed» — когда тело уже на полу, а не в полёте: иначе поза
+                # лежа снимается с ещё летящего ragdoll и подъём выглядит криво
+                var settled: bool = knock_t >= fall_hold + 1.2 or \
+                        (knock_t >= fall_hold and _ragdoll_settled())
+                if settled:
+                    _enter_downed()
+            elif knock_state == KnockState.GETUP:
+                knock_t += dt
+                if knock_t >= maxf(get_up_duration, 0.01):
+                    _finish_get_up()
+        else:
+            # потеря баланса (не нокдаун по HP): поднимаемся сами, как раньше
+            down_t -= dt
+            if down_t <= 0.0 and not ko:
+                _get_up()
 
     if not ko and not fallen:
         _body_physics(dt)
@@ -1055,7 +1109,7 @@ func _rig_tick(dt: float) -> void:
 
 
 func _fall_down(boost: Vector3 = Vector3.ZERO) -> void:
-    if fallen or ko:
+    if fallen or ko or knock_state != KnockState.NONE:
         return
     fallen = true
     down_t = 1.9
@@ -1081,6 +1135,149 @@ func _get_up() -> void:
     stamina = maxf(stamina, 45.0)
     wob_body.kick(Vector3(0.0, 1.5, 0.0))
     wob_torso.kick(Vector3(0.8, 0.0, 0.0))
+
+
+# ------------------------------------------------------- нокдаун и подъём
+
+## Удары, блок, уклон и шаг во время нокдауна недоступны.
+func is_down() -> bool:
+    return knock_state != KnockState.NONE
+
+
+## Пока лежим или встаём — урон не проходит.
+func is_invulnerable() -> bool:
+    return knockdown_invulnerable and knock_state != KnockState.NONE
+
+
+## HP дошло до нуля: падаем в нокдаун. Это замена KO-ветке, пока у бойца
+## остались попытки (их считает main.gd по max_knockdowns).
+func start_knockdown(impulse: Vector3 = Vector3.ZERO) -> bool:
+    if ko or knock_state != KnockState.NONE:
+        return false
+    hp = 0.0
+    ko = false
+    knock_state = KnockState.FALLING
+    knock_t = 0.0
+    fallen = true
+    down_t = 0.0
+    stun = maxf(stun, fall_hold + get_up_duration + 0.2)
+    punch_kind = ""
+    punch_aim = Vector3.ZERO
+    _punch_guard_off = Vector3.ZERO
+    blocking = false
+    evading = false
+    dodge_t = 0.0
+    vel = Vector3.ZERO
+    tilt = Vector2.ZERO
+    tilt_vel = Vector2.ZERO
+    var imp := impulse
+    if imp.length() < 0.5:
+        imp = -global_transform.basis.z * 2.0 + Vector3(0.0, 1.4, 0.0)
+    enter_ragdoll(imp)
+    knocked_down.emit()
+    knockdown_started.emit()
+    return true
+
+
+## Тело уже лежит на полу и почти не двигается.
+func _ragdoll_settled() -> bool:
+    var rb: RigidBody3D = ragdoll_parts.get("pelvis")
+    if rb == null:
+        return true
+    var p := rb.global_position
+    return p.y < 0.5 and rb.linear_velocity.length() < 1.1 and absf(p.x) < 3.4 and absf(p.z) < 3.4
+
+
+## Тело осело: снимаем позу лежа и переходим в «downed» — только теперь main.gd
+## запускает 10-секундный таймер и показывает подсказку.
+func _enter_downed() -> void:
+    knock_state = KnockState.DOWNED
+    knock_t = 0.0
+    var rb: RigidBody3D = ragdoll_parts.get("pelvis")
+    if rb != null:
+        var pelvis := rb.global_position
+        # Ориентацию лежачего тела задаём сами: таз ragdoll после падения часто
+        # остаётся почти вертикальным, и «лежа» выглядело как присед. Ложим на
+        # спину, головой от соперника — как после пропущенного удара.
+        _down_quat = Quaternion(Vector3.RIGHT, 1.5)
+        var hip_pt := to_local(pelvis)
+        # лежачее тело кладём на пол: таз на высоте полуроста корпуса, а не там,
+        # где оказался таз ragdoll (тот часто висит на куче других частей)
+        hip_pt.y = 0.20
+        _down_pos = hip_pt - _down_quat * Vector3(0.0, _hip_h_dyn, 0.0)
+    else:
+        _down_quat = Quaternion(Vector3.RIGHT, 1.5)
+        _down_pos = Vector3(0.0, -0.82, 0.0)
+    # ragdoll на полу уже не нужен: дальше лежит и встаёт обычный скелет,
+    # поэтому поза лежа → подъём идут без подмены модели
+    clear_ragdoll()
+    downed.emit()
+
+
+## Подъём запускается только из «downed»: во время падения встать нельзя.
+func begin_get_up() -> bool:
+    if knock_state != KnockState.DOWNED:
+        return false
+    knock_state = KnockState.GETUP
+    knock_t = 0.0
+    clear_ragdoll()
+    _rig_reset()
+    vel = Vector3.ZERO
+    stun = maxf(stun, get_up_duration * 0.5)
+    get_up_started.emit()
+    return true
+
+
+func _finish_get_up() -> void:
+    knock_state = KnockState.NONE
+    knock_t = 0.0
+    fallen = false
+    down_t = 0.0
+    body.basis = Basis.IDENTITY
+    body.position = Vector3.ZERO
+    vel = Vector3.ZERO
+    tilt = Vector2.ZERO
+    tilt_vel = Vector2.ZERO
+    # управление возвращается сразу: после анимации подъёма боец в стойке
+    stun = 0.0
+    _rig_reset()
+    _apply_pose(SH_GUARD_L, EL_GUARD_L, SH_GUARD_R, EL_GUARD_R, 1.0)
+    # счётчик растёт именно при подъёме, а не при падении: от него зависит,
+    # сколько HP вернётся и не пора ли засчитать поражение
+    knockdown_count += 1
+    get_up_finished.emit()
+
+
+## Процедурная анимация подъёма: тело из позы лежа (снятой с ragdoll) встаёт
+## через присед на колено. Ноги и руки ведём вручную — риг в это время стоит.
+func _getup_pose(dt: float) -> void:
+    var f := clampf(knock_t / maxf(get_up_duration, 0.01), 0.0, 1.0)
+    # первые ~15% — лежим и собираемся, потом встаём через присед
+    var up := smoothstep(0.0, 1.0, clampf((f - 0.15) / 0.85, 0.0, 1.0))
+    var q: Quaternion = _down_quat.slerp(Quaternion.IDENTITY, up).normalized()
+    body.basis = Basis(q)
+    body.position = _down_pos.lerp(Vector3.ZERO, up)
+    # присед: сначала подъём на колени, ближе к концу — в стойку
+    var tuck := sin(PI * clampf((f - 0.06) / 0.80, 0.0, 1.0))
+    body.position.y += 0.12 * tuck
+    hips.position = Vector3(0.0, _hip_h_dyn - 0.22 * tuck, 0.0)
+    hips.rotation = Vector3(0.0, 0.0, 0.0)
+    th_l.rotation = Vector3(0.85 * tuck + 0.10, 0.0, 0.0)
+    th_r.rotation = Vector3(0.75 * tuck - 0.06, 0.0, 0.0)
+    kn_l.rotation = Vector3(-1.65 * tuck - 0.32, 0.0, 0.0)
+    kn_r.rotation = Vector3(-1.55 * tuck - 0.28, 0.0, 0.0)
+    ft_l.basis = Basis(Vector3.RIGHT, -(th_l.rotation.x + kn_l.rotation.x))
+    ft_r.basis = Basis(Vector3.RIGHT, -(th_r.rotation.x + kn_r.rotation.x))
+    # руки: из упора перед собой в стойку у подбородка
+    var sup_l := Quaternion(Vector3.DOWN, Vector3(-0.20, -1.0, -0.35).normalized()).get_euler()
+    var sup_r := Quaternion(Vector3.DOWN, Vector3(0.20, -1.0, -0.35).normalized()).get_euler()
+    var ag := smoothstep(0.30, 1.0, f)
+    _apply_pose(sup_l.lerp(SH_GUARD_L, ag), lerpf(0.35, EL_GUARD_L, ag),
+            sup_r.lerp(SH_GUARD_R, ag), lerpf(0.35, EL_GUARD_R, ag),
+            clampf(dt * 20.0, 0.0, 1.0))
+    torso.rotation = wob_torso.step(dt, 62.0, 6.5) * 0.4
+    var hb := wob_head.step(dt, 46.0, 5.5)
+    head.rotation = Vector3(hb.x, hb.y, hb.z)
 
 
 # ------------------------------------------------------------------ анимация
@@ -1413,7 +1610,9 @@ func _animate(dt: float) -> void:
         # и возврате — обычное сглаживание, чтобы не дёргалось
         arm_k = clampf(maxf(k, clampf(float(pun_d["ext"]), 0.0, 1.0) * 0.60), 0.0, 1.0)
 
-    _apply_pose(l_sh, l_el, r_sh, r_el, k, q_l, q_r, arm_k)
+    # во время подъёма и лежания руки и ноги ведёт _getup_pose — не перебиваем
+    if knock_state != KnockState.GETUP and knock_state != KnockState.DOWNED:
+        _apply_pose(l_sh, l_el, r_sh, r_el, k, q_l, q_r, arm_k)
 
     # --- вспышка / телеграф
     var e := clampf(flash * 3.0, 0.0, 1.0)
@@ -1509,6 +1708,10 @@ func _apply_rig(twist: float, shift: Vector2, body_turn := 0.0,
 
 
 func _fall_pose(dt: float) -> void:
+    if knock_state == KnockState.GETUP or knock_state == KnockState.DOWNED:
+        # в DOWNED knock_t = 0, поэтому _getup_pose держит позу лежа
+        _getup_pose(dt)
+        return
     var f := ease(ko_fall, 2.0)
     if ko and not fallen:
         th_l.rotation.x = _lerp_angle(th_l.rotation.x, 0.5 * f, clampf(dt * 6.0, 0.0, 1.0))

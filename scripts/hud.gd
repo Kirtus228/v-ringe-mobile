@@ -35,8 +35,16 @@ var chain_lbl: Label
 var chain_bar: ColorRect
 var chain_bg: ColorRect
 var knockdown_lbl: Label
+var getup_lbl: Label
+var getup_time_lbl: Label
 var training_lbl: Label
 var opp_lbl: Label
+
+## Плавное восстановление полоски здоровья после подъёма: пока идёт tween,
+## рисуем это значение, затем снова берём настоящий HP.
+var p_hp_show := -1.0
+var e_hp_show := -1.0
+var hp_tween: Tween
 
 var font_n: SystemFont
 var font_b: SystemFont
@@ -92,9 +100,16 @@ func build() -> void:
     chain_lbl = _label("", 540, 100, 200, 14, AMBER, HORIZONTAL_ALIGNMENT_CENTER, true)
     chain_lbl.visible = false
 
-    knockdown_lbl = _label(Lang.t("knockdown"), 0, 200, W, 46, Color(0.98, 0.45, 0.35),
+    knockdown_lbl = _label(Lang.t("knockdown"), 0, 168, W, 46, Color(0.98, 0.45, 0.35),
             HORIZONTAL_ALIGNMENT_CENTER, true)
     knockdown_lbl.visible = false
+
+    # подсказка и обратный отсчёт на подъём: включаются только в состоянии downed
+    getup_lbl = _label(Lang.t("get_up_hint"), 0, 236, W, 26, Color(0.98, 0.86, 0.45),
+            HORIZONTAL_ALIGNMENT_CENTER, true)
+    getup_lbl.visible = false
+    getup_time_lbl = _label("", 0, 278, W, 36, TEXT, HORIZONTAL_ALIGNMENT_CENTER, true)
+    getup_time_lbl.visible = false
 
     training_lbl = _label(Lang.t("training_hud") + " · " + Lang.t("form").to_upper() + " 0 · "
             + Lang.t("exit_hint"), 0, 540, W, 20, AMBER,
@@ -142,12 +157,75 @@ func _bar(x: float, y: float, w: float, h: float, col: Color) -> ColorRect:
 
 
 func set_stats(php: float, pst: float, ehp: float, est: float) -> void:
-    p_hp_fill.size.x = 300.0 * clampf(php, 0.0, 1.0)
+    var pr := clampf(php, 0.0, 1.0)
+    if p_hp_show >= 0.0:
+        pr = p_hp_show
+    var er := clampf(ehp, 0.0, 1.0)
+    if e_hp_show >= 0.0:
+        er = e_hp_show
+    p_hp_fill.size.x = 300.0 * pr
     p_stam_fill.size.x = 300.0 * clampf(pst, 0.0, 1.0)
-    var ew := 300.0 * clampf(ehp, 0.0, 1.0)
+    var ew := 300.0 * er
     e_hp_fill.size.x = maxf(0.0, ew)
     e_hp_fill.position.x = 936.0 + (300.0 - ew)
     e_stam_fill.size.x = 300.0 * clampf(est, 0.0, 1.0)
+
+
+## Восстановление HP после подъёма: полоска доезжает плавно, без рывка.
+func animate_hp(ratio: float, as_player: bool = true, dur: float = 0.5) -> void:
+    if hp_tween != null and hp_tween.is_valid():
+        hp_tween.kill()
+    var target := clampf(ratio, 0.0, 1.0)
+    hp_tween = create_tween()
+    if as_player:
+        if p_hp_show < 0.0:
+            p_hp_show = p_hp_fill.size.x / 300.0
+        hp_tween.tween_property(self, "p_hp_show", target, dur)
+        hp_tween.tween_callback(func() -> void: p_hp_show = -1.0)
+    else:
+        if e_hp_show < 0.0:
+            e_hp_show = e_hp_fill.size.x / 300.0
+        hp_tween.tween_property(self, "e_hp_show", target, dur)
+        hp_tween.tween_callback(func() -> void: e_hp_show = -1.0)
+
+
+func reset_hp_anim() -> void:
+    if hp_tween != null and hp_tween.is_valid():
+        hp_tween.kill()
+    hp_tween = null
+    p_hp_show = -1.0
+    e_hp_show = -1.0
+    set_hp_dim(false)
+
+
+## Затемнить полоску здоровья, пока боец лежит.
+func set_hp_dim(on: bool) -> void:
+    var a := 0.30 if on else 1.0
+    if p_hp_fill:
+        p_hp_fill.modulate = Color(1, 1, 1, a)
+    if p_stam_fill:
+        p_stam_fill.modulate = Color(1, 1, 1, a)
+
+
+## Подсказка «Нажмите Space» и отсчёт: показываются только в состоянии downed.
+func set_downed(active: bool, hint: String = "") -> void:
+    if getup_lbl == null:
+        return
+    getup_lbl.visible = active
+    getup_time_lbl.visible = active
+    if active and hint != "":
+        getup_lbl.text = hint
+    if not active and getup_time_lbl:
+        getup_time_lbl.text = ""
+
+
+## Текст вида «Встать: 7.3 с»; последние 3 секунды — красным.
+func set_downed_time(seconds: float) -> void:
+    if getup_time_lbl == null or not getup_time_lbl.visible:
+        return
+    var s := maxf(seconds, 0.0)
+    getup_time_lbl.text = "%s: %.1f с" % [Lang.t("get_up_countdown"), s]
+    getup_time_lbl.add_theme_color_override("font_color", RED if s <= 3.0 else TEXT)
 
 
 func set_opponent_name(name: String) -> void:
@@ -620,10 +698,11 @@ func show_howto(d: Dictionary) -> void:
     _overlay_rect(656, 104, 560, 232, Color(0.02, 0.03, 0.05, 0.86))
     var y := 122.0
     for line in [Lang.t("howto_move"), Lang.t("howto_punch"), Lang.t("howto_body"),
-            Lang.t("howto_rope"), Lang.t("howto_career"), Lang.t("howto_form")]:
+            Lang.t("howto_knockdown"), Lang.t("howto_rope"), Lang.t("howto_career"),
+            Lang.t("howto_form")]:
         _overlay_label("•  " + line, 680, y, 520, 13, Color(0.84, 0.88, 0.95),
                 HORIZONTAL_ALIGNMENT_LEFT, false)
-        y += 36.0
+        y += 31.0
 
     _btn(Lang.t("back"), Vector2(540, 372), Vector2(200, 48), "back")
     _overlay_label(Lang.t("howto_back"), 0, 436, W, 12, MUTED)
