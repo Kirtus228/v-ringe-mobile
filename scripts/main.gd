@@ -369,6 +369,7 @@ var story_seen := false
 var touch: CanvasLayer
 var touch_ui := false
 var touch_flag := false
+var touch_body := false
 
 var reset_armed := 0.0
 var saved_flash := 0.0
@@ -416,6 +417,8 @@ var splash_only := false
 var sim_seconds := 0.0
 var forced_state := ""
 var pose_mode := ""
+var pose_phase := 0.5
+var pose_sheet := ""
 var punch_kind_arg := ""
 var cam_mode := ""
 var solo := false
@@ -670,6 +673,10 @@ func _parse_args() -> void:
             forced_state = a.substr(8)
         elif a.begins_with("--pose="):
             pose_mode = a.substr(7)
+        elif a.begins_with("--phase="):
+            pose_phase = float(a.substr(8))
+        elif a.begins_with("--poses="):
+            pose_sheet = a.substr(8)
         elif a.begins_with("--punch="):
             punch_kind_arg = a.substr(8)
         elif a.begins_with("--cam="):
@@ -737,6 +744,9 @@ func _parse_args() -> void:
             touch_flag = true
         elif a == "--touch":
             touch_flag = true
+        elif a == "--touchbody":
+            touch_flag = true
+            touch_body = true
         elif a.begins_with("--lang="):
             lang_override = a.substr(7)
         elif a.begins_with("--belt="):
@@ -825,7 +835,8 @@ func _build_world() -> void:
         touch = TouchScript.new()
         add_child(touch)
         touch.build()
-        touch.punch.connect(func(kind: String) -> void: _player_punch(kind))
+        touch.punch.connect(func(kind: String) -> void: _player_punch(kind, touch.body_mode))
+        touch.body_mode = touch_body
         touch.dodge.connect(_on_touch_dodge)
         touch.pause_pressed.connect(_on_touch_pause)
         print("TOUCH включено: тач=", DisplayServer.is_touchscreen_available(),
@@ -1537,7 +1548,10 @@ func _apply_forced_state() -> void:
         demo = true
     if pose_mode != "":
         _start_fight()
-        _apply_pose()
+        if pose_sheet != "":
+            _run_pose_sheet()
+        else:
+            _apply_pose()
     elif autoplay or forced_state == "fight":
         _start_fight()
     elif forced_state == "menu":
@@ -1557,8 +1571,8 @@ func _apply_forced_state() -> void:
         # живой удар без прокрутки: покадровая съёмка всей анимации
         no_ai = true
         _start_fight()
-        player.reset(Vector3(0.02, 0, 0.80), 100.0)
-        enemy.reset(Vector3(0.0, 0, -0.45), 110.0)
+        player.reset(Vector3(0.02, 0, 0.60), 100.0)
+        enemy.reset(Vector3(0.0, 0, -0.22), 110.0)
         _face_each_other()
         var pk := "jab" if punch_kind_arg == "" else punch_kind_arg
         _punch(player, enemy, pk, pk.begins_with("body_"))
@@ -1640,6 +1654,10 @@ func _apply_forced_state() -> void:
         _set_state(St.KO)
     else:
         _set_state(St.MENU)
+    # отладочный кадр: показать мобильные кнопки с включённым корпусом
+    if touch_ui and touch != null and touch_body:
+        touch.body_mode = true
+        touch.pad.queue_redraw()
 
 
 func _start_fight() -> void:
@@ -1796,7 +1814,18 @@ func _maybe_frames(_delta: float) -> void:
     if forced_state != "":
         print("FRAME ", idx, " state=", state, " p=", player.position,
                 " e=", enemy.position, " упал=", player.fallen, "/", enemy.fallen,
-                " ко=", player.ko, "/", enemy.ko)
+                " ко=", player.ko, "/", enemy.ko, " cam=", cam.position.snapped(Vector3(0.01, 0.01, 0.01)),
+                " cam_mode=", cam_mode, " cur_cam=", get_viewport().get_camera_3d(),
+                " body=", player.body.global_position.snapped(Vector3(0.01, 0.01, 0.01)),
+                " pvis=", player.visible, "/", player.body.visible,
+                " torsoY=", player.torso.global_transform.basis.y.snapped(Vector3(0.01, 0.01, 0.01)),
+                " lean=", player._lean.snapped(Vector2(0.01, 0.01)),
+                " hips=", player.hips.position.snapped(Vector3(0.01, 0.01, 0.01)),
+                " trot=", player.hips.rotation.snapped(Vector3(0.01, 0.01, 0.01)),
+                " chest=", player.rj_chest.p.snapped(Vector3(0.01, 0.01, 0.01)),
+                " ctgt=", player.rj_chest.tgt.snapped(Vector3(0.01, 0.01, 0.01)),
+                " pel=", player.rj_pelvis.p.snapped(Vector3(0.01, 0.01, 0.01)),
+                " ptgt=", player.rj_pelvis.tgt.snapped(Vector3(0.01, 0.01, 0.01)))
     if shots_idx >= shots_count:
         print("FRAMES done ", shots_idx)
         get_tree().quit()
@@ -1804,26 +1833,14 @@ func _apply_pose() -> void:
     player.position = Vector3(0.04, 0, 0.78)
     enemy.position = Vector3(0, 0, -0.6)
     _face_each_other()
-    # для кадров удара ставим бойцов на дистанцию удара и целимся в голову
-    if pose_mode == "jab" or pose_mode == "hook" or pose_mode == "rhook" or pose_mode == "upper":
-        player.position = Vector3(0.04, 0, 0.62)
-        enemy.position = Vector3(0, 0, -0.5)
-        _face_each_other()
-        player.punch_aim = _aim_at(enemy)
+    # поза удара: бойцы на дистанции удара, игрок целится в голову
+    var pk := pose_mode
+    if pk == "hook":
+        pk = "lhook"
+    if pk in ["jab", "cross", "lhook", "rhook", "upper"]:
+        _pose_once(pk, pose_phase)
+        return
     match pose_mode:
-        "jab":
-            player.freeze_pose("jab", 0.5)
-            enemy.blocking = true
-            enemy.freeze_pose("", 0.0)
-        "upper":
-            player.freeze_pose("upper", 0.45)
-            enemy.freeze_pose("", 0.0)
-        "hook":
-            player.freeze_pose("lhook", 0.5)
-            enemy.freeze_pose("", 0.0)
-        "rhook":
-            player.freeze_pose("rhook", 0.52)
-            enemy.freeze_pose("", 0.0)
         "dodge":
             player.dodge_t = 0.4
             player.evading = true
@@ -1861,6 +1878,40 @@ func _apply_pose() -> void:
         _:
             player.freeze_pose("", 0.0)
             enemy.freeze_pose("", 0.0)
+
+
+## Отладочная раскадровка удара: ставит позу на заданных фазах и сохраняет
+## кадры <prefix>_00.png… — по ним видно, похож ли удар на настоящий.
+func _run_pose_sheet() -> void:
+    var phases := [0.0, 0.16, 0.28, 0.38, 0.48, 0.58, 0.70, 0.84, 1.0]
+    for i in phases.size():
+        pose_phase = float(phases[i])
+        _pose_once(pose_mode, pose_phase)
+        for f in 3:
+            await get_tree().process_frame
+        await RenderingServer.frame_post_draw
+        var img := get_viewport().get_texture().get_image()
+        img.save_png("%s_%02d.png" % [pose_sheet, i])
+        print("POSESHEET ", i, " phase=", pose_phase, " kind=", pose_mode,
+                " torsoY=", player.torso.global_transform.basis.y.snapped(Vector3(0.01, 0.01, 0.01)),
+                " head=", player.head.global_position.snapped(Vector3(0.01, 0.01, 0.01)),
+                " glove=", player.glove_point(str(player.punch_info(pose_mode)["arm"])).snapped(Vector3(0.01, 0.01, 0.01)),
+                " aim=", player.punch_aim.snapped(Vector3(0.01, 0.01, 0.01)))
+    print("POSESHEET done")
+    get_tree().quit()
+
+
+## Одна поза удара с чистого листа: сбрасываем бойцов, чтобы на кадр не
+## налезали остатки предыдущей позы и шагов.
+func _pose_once(kind: String, phase: float) -> void:
+    var pk := "lhook" if kind == "hook" else kind
+    player.reset(Vector3(0.04, 0, 0.52), 100.0)
+    enemy.reset(Vector3(0, 0, -0.2), 120.0)
+    _face_each_other()
+    player.punch_aim = _aim_at(enemy)
+    enemy.blocking = pk == "jab"
+    player.freeze_pose(pk, phase, false)
+    enemy.freeze_pose("", 0.0, false)
 
 
 func _check_shot() -> void:
@@ -3110,6 +3161,26 @@ func _update_camera(delta: float) -> void:
         cam.position = Vector3(5.6, 1.55, 0.0)
         cam.look_at(Vector3(0.0, 1.0, 0.0), Vector3.UP)
         return
+    if cam_mode == "duel" or cam_mode == "duel2":
+        # отладочный ракурс для съёмки ударов: видно и корпус, и вынос руки
+        cam.fov = 50.0
+        var sx := 1.0 if cam_mode == "duel" else -1.0
+        cam.position = Vector3(2.9 * sx, 1.62, 2.9)
+        cam.look_at(Vector3(0.0, 1.16, 0.06), Vector3.UP)
+        return
+    if cam_mode == "top":
+        # вид сверху: видно дугу бокового удара и замах
+        cam.fov = 50.0
+        cam.position = Vector3(0.25, 4.3, 1.15)
+        cam.look_at(Vector3(0.06, 1.15, -0.02), Vector3.UP)
+        return
+    if cam_mode == "profile" or cam_mode == "profile2":
+        # чистый профиль бойца вплотную: для съёмки траектории удара
+        cam.fov = 42.0
+        var px := 3.0 if cam_mode == "profile" else -3.0
+        cam.position = Vector3(px, 1.35, 1.05)
+        cam.look_at(Vector3(0.0, 1.15, 0.0), Vector3.UP)
+        return
     var focus := (player.position + enemy.position) * 0.5
     var base := Vector3(3.0 + focus.x * 0.3, 3.1, 4.5 + focus.z * 0.4)
     if cam_shake > 0.05:
@@ -4222,6 +4293,58 @@ func _run_touchtest() -> void:
     up.pressed = false
     up.position = Vector2(jab["pos"])
     touch._on_gui_input(up)
+
+    # пятая кнопка — кросс
+    var cbtn := {}
+    for b in touch.BTN:
+        if String(b["id"]) == "cross":
+            cbtn = b
+    player.punch_kind = ""
+    var ct := InputEventScreenTouch.new()
+    ct.index = 5
+    ct.pressed = true
+    ct.position = Vector2(cbtn["pos"])
+    touch._on_gui_input(ct)
+    await get_tree().process_frame
+    var cross_ok: bool = player.punch_kind == "cross"
+    print("TOUCHTEST кросс: вид=", player.punch_kind, " ожидали=cross")
+    var ct_up := InputEventScreenTouch.new()
+    ct_up.index = 5
+    ct_up.pressed = false
+    ct_up.position = ct.position
+    touch._on_gui_input(ct_up)
+
+    # переключатель корпуса: включаем и бьём джеб — должен уйти body_jab
+    var bbtn := {}
+    for b in touch.BTN:
+        if String(b["id"]) == "body":
+            bbtn = b
+    player.punch_kind = ""
+    var bt2 := InputEventScreenTouch.new()
+    bt2.index = 6
+    bt2.pressed = true
+    bt2.position = Vector2(bbtn["pos"])
+    touch._on_gui_input(bt2)
+    var body_on: bool = touch.body_mode
+    var bt2_up := InputEventScreenTouch.new()
+    bt2_up.index = 6
+    bt2_up.pressed = false
+    bt2_up.position = bt2.position
+    touch._on_gui_input(bt2_up)
+    var jt := InputEventScreenTouch.new()
+    jt.index = 7
+    jt.pressed = true
+    jt.position = Vector2(jab["pos"])
+    touch._on_gui_input(jt)
+    await get_tree().process_frame
+    var body_ok: bool = player.punch_kind == "body_jab"
+    print("TOUCHTEST корпус: включён=", body_on, " вид=", player.punch_kind, " ожидали=body_jab")
+    var jt_up := InputEventScreenTouch.new()
+    jt_up.index = 7
+    jt_up.pressed = false
+    jt_up.position = jt.position
+    touch._on_gui_input(jt_up)
+    ok = ok and cross_ok and body_on and body_ok
 
     # стик: тянем вверх-вправо
     var st := InputEventScreenTouch.new()

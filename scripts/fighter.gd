@@ -67,6 +67,25 @@ const BODY_PUNCHES := {
         "score": 26, "push": 0.48, "stun": 0.26, "stam": 20.0, "stam_hit": 20.0},
 }
 
+## Траектория перчатки для каждого удара. Координаты локальные, от точки
+## попадания: x — вправо, y — вверх, z — назад (цель впереди бойца).
+## wind — куда перчатка уходит на замахе, mid — контрольная точка дуги
+## (прямые удары идут почти по нитке, крюки — по дуге сбоку, апперкот — снизу),
+## pole — куда смотрит локоть, dip — насколько проседают колени на замахе,
+## drive — насколько корпус идёт вперёд на выносе.
+const PUNCH_PATH := {
+    "jab": {"wind": Vector3(-0.11, 0.02, 0.30), "mid": Vector3(-0.04, 0.0, 0.03),
+        "pole": Vector3(0.30, -0.90, 0.20), "dip": 0.05, "drive": 0.30},
+    "cross": {"wind": Vector3(0.15, -0.01, 0.34), "mid": Vector3(0.06, 0.0, 0.04),
+        "pole": Vector3(0.35, -0.90, 0.25), "dip": 0.08, "drive": 0.55},
+    "lhook": {"wind": Vector3(-0.50, -0.20, 0.26), "mid": Vector3(-0.40, -0.03, 0.02),
+        "pole": Vector3(-0.85, -0.45, 0.15), "dip": 0.22, "drive": 0.40},
+    "rhook": {"wind": Vector3(0.50, -0.20, 0.26), "mid": Vector3(0.40, -0.03, 0.02),
+        "pole": Vector3(0.85, -0.45, 0.15), "dip": 0.22, "drive": 0.40},
+    "upper": {"wind": Vector3(0.16, -0.55, 0.22), "mid": Vector3(0.07, -0.22, -0.04),
+        "pole": Vector3(0.20, -1.0, 0.50), "dip": 0.34, "drive": 0.55},
+}
+
 const SH_GUARD_L := Vector3(0.50, 0.0, 0.0)
 const SH_GUARD_R := Vector3(0.56, 0.0, 0.0)
 const EL_GUARD_L := 2.40
@@ -108,6 +127,9 @@ var punch_dur := 0.3
 var punch_hit_at := 0.13
 var hit_done := false
 var punch_aim := Vector3.ZERO
+## где перчатка была в момент старта удара, относительно точки попадания
+## (локально): с этого места начинается замах, поэтому рука не прыгает.
+var _punch_guard_off := Vector3.ZERO
 var telegraph := false
 var hits := 0
 var taken := 0.0
@@ -570,6 +592,11 @@ func start_punch(kind: String, aim: Vector3 = Vector3.ZERO) -> bool:
     punch_hit_at = float(p["hit_at"]) * dur_mult
     hit_done = false
     punch_aim = aim
+    _punch_guard_off = Vector3.ZERO
+    if aim != Vector3.ZERO:
+        # стартовая точка замаха — текущее положение перчатки в системе цели
+        _punch_guard_off = global_transform.basis.inverse() \
+                * (glove_point(str(p["arm"])) - aim)
     _idle_t = 0.0
     # шаг вперёд под удар: иначе перчатка не достаёт до цели
     var fwd: Vector3 = -global_transform.basis.z
@@ -691,6 +718,7 @@ func reset(spawn: Vector3, hp_value: float) -> void:
     punch_kind = ""
     punch_t = 0.0
     punch_aim = Vector3.ZERO
+    _punch_guard_off = Vector3.ZERO
     hit_done = false
     telegraph = false
     hits = 0
@@ -735,16 +763,21 @@ func reset(spawn: Vector3, hp_value: float) -> void:
     _rig_reset()
 
 
-func freeze_pose(kind: String, phase: float) -> void:
+func freeze_pose(kind: String, phase: float, settle: bool = true) -> void:
     punch_kind = kind
     if kind != "":
-        punch_dur = float(punch_info(kind)["dur"])
-        punch_hit_at = float(punch_info(kind)["hit_at"])
+        var fp: Dictionary = punch_info(kind)
+        punch_dur = float(fp["dur"])
+        punch_hit_at = float(fp["hit_at"])
         punch_t = punch_dur * phase
+        if punch_aim != Vector3.ZERO:
+            _punch_guard_off = global_transform.basis.inverse() \
+                    * (glove_point(str(fp["arm"])) - punch_aim)
     else:
         punch_t = 0.0
+        _punch_guard_off = Vector3.ZERO
     _walk_speed = 0.0
-    if not ko and not fallen:
+    if not ko and not fallen and settle:
         for i in 12:
             _rig_tick(1.0 / 60.0)
     _animate(100.0)
@@ -938,7 +971,19 @@ func _rig_targets(dt: float) -> void:
     _lean_vel += Vector2(sin(t * 0.83 + 1.1), cos(t * 1.17 + 0.4)) * (2.3 * idle_amp * dt)
     _lean = (_lean + _lean_vel * dt).limit_length(1.35)
 
-    var hip_h := 0.95 - 0.30 * _crouch - 0.02 * clampf(spd, 0.0, 2.0) + sin(t * 2.1) * 0.008
+    # механика удара: проседание на замахе и довод корпуса на выносе.
+    # Апперкот и крюки «садятся» на колени, а затем корпус идёт вперёд.
+    var dip := 0.0
+    var drive := 0.0
+    if punch_kind != "":
+        var pp: Dictionary = punch_info(punch_kind)
+        var pth: Dictionary = PUNCH_PATH.get(str(pp.get("anim", punch_kind)), PUNCH_PATH["jab"])
+        var ph := _punch_phases()
+        dip = float(pth.get("dip", 0.0)) * float(ph["wind"]) * (1.0 - float(ph["hit"]))
+        drive = float(pth.get("drive", 0.0)) * float(ph["ext"])
+
+    var hip_h := 0.95 - 0.30 * _crouch - 0.16 * dip \
+            - 0.02 * clampf(spd, 0.0, 2.0) + sin(t * 2.1) * 0.008
     _hip_h_dyn = hip_h
     var nz := Vector3(
         sin(t * 1.13) * 0.028 + sin(t * 2.71 + 1.3) * 0.011,
@@ -948,8 +993,8 @@ func _rig_targets(dt: float) -> void:
     var pl := Vector3(_lean.x * hip_h * 0.34 + nz.x + bb.x,
             hip_h + bb.y,
             -_lean.y * hip_h * 0.34 + nz.z + bb.z)
-    var cl := pl + Vector3(_lean.x * 0.24 + nz.x * 1.3, 0.50,
-            -_lean.y * 0.24 - 0.055 - spd * 0.018 + nz.z * 1.3)
+    var cl := pl + Vector3(_lean.x * 0.24 + nz.x * 1.3, 0.50 - dip * 0.05,
+            -_lean.y * 0.24 - 0.055 - spd * 0.018 + nz.z * 1.3 - drive * 0.10)
     # голова: цель — там, где она была бы жёстко, пружина даёт отставание
     var hu: Vector3 = torso.global_transform.basis.y.normalized()
     var hl: Vector3 = to_local(head.global_position + hu * 0.19)
@@ -1022,17 +1067,45 @@ func _lerp_angle(cur: float, target: float, k: float) -> float:
     return lerpf(cur, target, clampf(k, 0.0, 1.0))
 
 
-## Кривая удара: короткий замах, резкий выброс, удержание, возврат.
-func _punch_ext(t01: float) -> float:
-    if t01 < 0.14:
-        return 0.0
-    if t01 < 0.46:
-        var u := (t01 - 0.14) / 0.32
-        return ease(u, 0.45)
-    if t01 < 0.62:
-        return 1.0
-    var d := (t01 - 0.62) / 0.38
-    return 1.0 - ease(d, 0.6)
+## Фазы удара в долях длительности: замах (wind) → вынос до цели (hit) →
+## удержание → возврат (back). "tw" — куда повёрнут корпус (−0.3 — замах в
+## обратную сторону, 1.0 — полный доворот в удар), "sh" — смещение таза.
+func _punch_phases() -> Dictionary:
+    var dur: float = maxf(punch_dur, 0.001)
+    var h := clampf(punch_hit_at / dur, 0.12, 0.90)
+    var t01 := clampf(punch_t / dur, 0.0, 1.0)
+    var w_end := h * 0.46
+    var hold_end := minf(h + 0.10, 0.94)
+    var d := {"wind": 0.0, "hit": 0.0, "back": 0.0, "ext": 0.0, "tw": 0.0, "sh": 0.0}
+    if t01 < w_end:
+        # замах: перчатка уходит наружу/вниз, корпус подкручивается обратно
+        var u := ease(t01 / maxf(w_end, 0.001), 1.4)
+        d["wind"] = u
+        d["tw"] = -0.30 * u
+        d["sh"] = -0.24 * u
+    elif t01 < h:
+        var u := ease((t01 - w_end) / maxf(h - w_end, 0.001), 0.55)
+        d["wind"] = 1.0
+        d["hit"] = u
+        d["ext"] = u
+        d["tw"] = lerpf(-0.30, 1.0, u)
+        d["sh"] = lerpf(-0.24, 1.0, u)
+    elif t01 < hold_end:
+        d["wind"] = 1.0
+        d["hit"] = 1.0
+        d["ext"] = 1.0
+        d["tw"] = 1.0
+        d["sh"] = 1.0
+    else:
+        var u := clampf((t01 - hold_end) / maxf(1.0 - hold_end, 0.001), 0.0, 1.0)
+        var r := 1.0 - ease(u, 0.75)
+        d["wind"] = 1.0
+        d["hit"] = r
+        d["ext"] = r
+        d["back"] = 1.0 - r
+        d["tw"] = r
+        d["sh"] = r
+    return d
 
 
 ## Центр перчатки в мире — по нему считаем попадание и эффект.
@@ -1042,8 +1115,9 @@ func glove_point(arm: String) -> Vector3:
 
 
 ## Двухзвенная IK руки в точку aim: поворот плеча (локально к торсу)
-## и угол локтя. Держит удар нацеленным точно в цель — в голову или корпус.
-func _aim_arm(sh_node: Node3D, aim: Vector3) -> Dictionary:
+## и угол локтя. pole_world — куда вынести локоть (для крюков — в сторону,
+## для апперкота — вниз): от этого зависит, идёт перчатка по дуге или по нитке.
+func _aim_arm(sh_node: Node3D, aim: Vector3, pole_world: Vector3 = Vector3.ZERO) -> Dictionary:
     const A := 0.34
     const B := 0.42
     var sp: Vector3 = sh_node.global_position
@@ -1059,6 +1133,10 @@ func _aim_arm(sh_node: Node3D, aim: Vector3) -> Dictionary:
     var perp: Vector3 = side.cross(dir).normalized()
     if perp.y > 0.0:
         perp = -perp
+    if pole_world.length() > 0.01:
+        var pw: Vector3 = pole_world - dir * pole_world.dot(dir)
+        if pw.length() > 0.05:
+            perp = perp.lerp(pw.normalized(), 0.85).normalized()
     var upper: Vector3 = (dir * cos(alpha) + perp * sin(alpha)).normalized()
     var elbow_pos: Vector3 = sp + upper * A
     var v: Vector3 = aim - elbow_pos
@@ -1169,53 +1247,49 @@ func _animate(dt: float) -> void:
     var arm_side := ""
     var q_l: Variant = null
     var q_r: Variant = null
+    # удар по цели: IK руки считается уже после доворота корпуса (см. ниже)
+    var has_aim := false
+    var pun_arm := ""
+    var pun_path: Dictionary = {}
+    var pun_d: Dictionary = {}
 
     if punch_kind != "":
         var p: Dictionary = punch_info(punch_kind)
-        var t01 := clampf(punch_t / punch_dur, 0.0, 1.0)
-        var ext := _punch_ext(t01)
+        var anim := str(p.get("anim", punch_kind))
+        var path: Dictionary = PUNCH_PATH.get(anim, PUNCH_PATH["jab"])
+        var d := _punch_phases()
+        var ext := float(d["ext"])
+        var t01 := clampf(punch_t / maxf(punch_dur, 0.001), 0.0, 1.0)
         var target_sh: Vector3 = p["sh"]
         var target_el: float = float(p["el"])
         var punch_arm := str(p["arm"])
         arm_ext = clampf(ext, 0.0, 1.0)
         arm_side = punch_arm
-        ptwist = float(p.get("twist", 0.0)) * ext
-        pshift = p.get("hip", Vector2.ZERO) * ext
-        if punch_aim != Vector3.ZERO:
-            # удар ведём по цели: плечо и локоть считаются IK в точку попадания
-            var sh_node: Node3D = sh_l if punch_arm == "l" else sh_r
-            var sol: Dictionary = _aim_arm(sh_node, punch_aim)
-            var g_sh: Vector3 = SH_GUARD_L if punch_arm == "l" else SH_GUARD_R
-            var g_el: float = EL_GUARD_L if punch_arm == "l" else EL_GUARD_R
-            var gq := Quaternion.from_euler(g_sh)
-            var want: Quaternion = gq.slerp(sol["qa"], clampf(ext, 0.0, 1.0)).normalized()
-            var el_t := lerpf(g_el, float(sol["el"]), clampf(ext, 0.0, 1.0))
-            # вторая рука остаётся в стойке у подбородка: поджимается и уходит
-            # чуть назад, а не тянется вперёд — иначе кажется, что бьют двумя руками
-            if punch_arm == "l":
-                q_l = want
-                l_el = el_t
-                r_sh = SH_GUARD_R.lerp(SH_OFF_R, ext)
-                r_el = lerpf(EL_GUARD_R, EL_OFF_R, ext)
-            else:
-                q_r = want
-                r_el = el_t
-                l_sh = SH_GUARD_L.lerp(SH_OFF_L, ext)
-                l_el = lerpf(EL_GUARD_L, EL_OFF_L, ext)
-        elif punch_arm == "l":
-            l_sh = SH_GUARD_L.lerp(target_sh, ext)
-            l_el = lerpf(EL_GUARD_L, target_el, ext)
+        ptwist = float(p.get("twist", 0.0)) * float(d["tw"])
+        pshift = p.get("hip", Vector2.ZERO) * float(d["sh"])
+        # вторая рука остаётся в стойке у подбородка: поджимается и уходит
+        # чуть назад, а не тянется вперёд — иначе кажется, что бьют двумя руками
+        if punch_arm == "l":
             r_sh = SH_GUARD_R.lerp(SH_OFF_R, ext)
             r_el = lerpf(EL_GUARD_R, EL_OFF_R, ext)
         else:
+            l_sh = SH_GUARD_L.lerp(SH_OFF_L, ext)
+            l_el = lerpf(EL_GUARD_L, EL_OFF_L, ext)
+        if punch_aim != Vector3.ZERO:
+            has_aim = true
+            pun_arm = punch_arm
+            pun_path = path
+            pun_d = d
+        elif punch_arm == "l":
+            l_sh = SH_GUARD_L.lerp(target_sh, ext)
+            l_el = lerpf(EL_GUARD_L, target_el, ext)
+        else:
             var wind := clampf(t01 * 3.0, 0.0, 1.0)
-            if str(p.get("anim", punch_kind)) == "upper":
+            if anim == "upper":
                 r_sh = SH_UPPER_BACK.lerp(SH_GUARD_R, 1.0 - wind).lerp(target_sh, ext)
             else:
                 r_sh = SH_GUARD_R.lerp(target_sh, ext)
             r_el = lerpf(EL_GUARD_R, target_el, ext)
-            l_sh = SH_GUARD_L.lerp(SH_OFF_L, ext)
-            l_el = lerpf(EL_GUARD_L, EL_OFF_L, ext)
     elif telegraph:
         r_sh = SH_UPPER_BACK
 
@@ -1238,7 +1312,19 @@ func _animate(dt: float) -> void:
 
     l_sh = Vector3(l_sh.x, l_sh.y, l_sh.z + arm_z_l)
     r_sh = Vector3(r_sh.x, r_sh.y, r_sh.z + arm_z_r)
-    _apply_pose(l_sh, l_el, r_sh, r_el, k, q_l, q_r)
+
+    # --- уклон: приседаем пружиной (с перелётом) и уводим корпус
+    var crouch_target := 1.0 if evading else 0.0
+    _crouch_vel += ((crouch_target - _crouch) * 145.0 - _crouch_vel * 9.0) * dt
+    _crouch += _crouch_vel * dt
+    _crouch = clampf(_crouch, -0.12, 1.25)
+
+    # Корпус доворачивается ДО того, как решается IK руки: иначе рука считается
+    # к старому положению торса и после доворота уезжает мимо цели.
+    if ko or fallen:
+        _fall_pose(dt)
+    else:
+        _apply_rig(ptwist, pshift)
 
     # плечо выносится вперёд на удар — перчатка достаёт до головы цели.
     # Сглаживаем, иначе плечо прыгает на 13 см за пару кадров и рука дёргается.
@@ -1248,16 +1334,38 @@ func _animate(dt: float) -> void:
     sh_l.position = sh_l_base + Vector3(0.0, 0.0, -_prot_l)
     sh_r.position = sh_r_base + Vector3(0.0, 0.0, -_prot_r)
 
-    # --- уклон: приседаем пружиной (с перелётом) и уводим корпус
-    var crouch_target := 1.0 if evading else 0.0
-    _crouch_vel += ((crouch_target - _crouch) * 145.0 - _crouch_vel * 9.0) * dt
-    _crouch += _crouch_vel * dt
-    _crouch = clampf(_crouch, -0.12, 1.25)
+    if has_aim:
+        # Траектория перчатки: замах из текущей стойки → дуга (крюк сбоку,
+        # апперкот снизу, прямые почти по нитке) → точка попадания → возврат.
+        var b := global_transform.basis
+        var w_off: Vector3 = pun_path["wind"]
+        var m_off: Vector3 = pun_path["mid"]
+        var hit := float(pun_d["hit"])
+        var back := float(pun_d["back"])
+        var off := _punch_guard_off
+        if back > 0.0:
+            off = _punch_guard_off * ease(back, 0.7)
+        elif hit > 0.0:
+            var hu := hit
+            off = w_off * (1.0 - hu) * (1.0 - hu) + m_off * 2.0 * (1.0 - hu) * hu
+        else:
+            off = _punch_guard_off.lerp(w_off, float(pun_d["wind"]))
+        var sh_node: Node3D = sh_l if pun_arm == "l" else sh_r
+        var sol: Dictionary = _aim_arm(sh_node, punch_aim + b * off, b * Vector3(pun_path["pole"]))
+        var ext2 := clampf(float(pun_d["ext"]), 0.0, 1.0)
+        var qb := clampf(maxf(ext2, float(pun_d["wind"]) * 0.9), 0.0, 1.0)
+        var gq: Quaternion = Quaternion.from_euler(SH_GUARD_L if pun_arm == "l" else SH_GUARD_R)
+        var want: Quaternion = gq.slerp(sol["qa"], qb).normalized()
+        var g_el: float = EL_GUARD_L if pun_arm == "l" else EL_GUARD_R
+        var el_t := lerpf(g_el, float(sol["el"]), qb)
+        if pun_arm == "l":
+            q_l = want
+            l_el = el_t
+        else:
+            q_r = want
+            r_el = el_t
 
-    if ko or fallen:
-        _fall_pose(dt)
-    else:
-        _apply_rig(ptwist, pshift)
+    _apply_pose(l_sh, l_el, r_sh, r_el, k, q_l, q_r)
 
     # --- вспышка / телеграф
     var e := clampf(flash * 3.0, 0.0, 1.0)

@@ -25,18 +25,22 @@ const KNOB_R := 46.0
 const DEAD := 0.16
 
 const BTN := [
-    {"id": "hook_l", "label": "ЛЕВЫЙ", "pos": Vector2(112, 496), "r": 54.0},
-    {"id": "hook_r", "label": "ПРАВЫЙ", "pos": Vector2(256, 496), "r": 54.0},
-    {"id": "upper", "label": "АППЕР", "pos": Vector2(112, 628), "r": 54.0},
-    {"id": "jab", "label": "ДЖЕБ", "pos": Vector2(256, 628), "r": 58.0},
-    {"id": "block", "label": "БЛОК", "pos": Vector2(70, 366), "r": 42.0, "hold": true},
-    {"id": "dodge", "label": "УКЛОН", "pos": Vector2(186, 366), "r": 42.0},
+    {"id": "hook_l", "label": "ЛЕВЫЙ", "pos": Vector2(136, 458), "r": 48.0},
+    {"id": "hook_r", "label": "ПРАВЫЙ", "pos": Vector2(252, 458), "r": 48.0},
+    {"id": "cross", "label": "КРОСС", "pos": Vector2(368, 458), "r": 48.0},
+    {"id": "upper", "label": "АППЕР", "pos": Vector2(136, 586), "r": 48.0},
+    {"id": "jab", "label": "ДЖЕБ", "pos": Vector2(252, 586), "r": 54.0},
+    {"id": "body", "label": "КОРПУС", "pos": Vector2(368, 348), "r": 44.0, "toggle": true},
+    {"id": "block", "label": "БЛОК", "pos": Vector2(70, 348), "r": 42.0, "hold": true},
+    {"id": "dodge", "label": "УКЛОН", "pos": Vector2(186, 348), "r": 42.0},
     {"id": "pause", "label": "II", "pos": Vector2(1216, 236), "r": 34.0},
 ]
 
 var active := false
 var move := Vector2.ZERO
 var block := false
+## переключатель «бить в корпус»: пока включён, все удары идут по корпусу
+var body_mode := false
 
 var pad: Control
 var font: SystemFont
@@ -66,6 +70,7 @@ func build() -> void:
 
 func set_active(on: bool) -> void:
     active = on
+    body_mode = false
     if pad != null:
         pad.visible = on
         pad.mouse_filter = Control.MOUSE_FILTER_STOP if on else Control.MOUSE_FILTER_IGNORE
@@ -164,12 +169,17 @@ func _press(id: String, hold: bool, index: int) -> void:
     match id:
         "jab":
             punch.emit("jab")
+        "cross":
+            punch.emit("cross")
         "hook_l":
             punch.emit("lhook")
         "hook_r":
             punch.emit("rhook")
         "upper":
             punch.emit("upper")
+        "body":
+            # кнопка-переключатель: следующий удар (и все, пока горит) — в корпус
+            body_mode = not body_mode
         "dodge":
             dodge.emit()
         "pause":
@@ -200,15 +210,24 @@ func _draw_pad() -> void:
         var c := Vector2(b["pos"])
         var r: float = float(b["r"])
         var hot := bool(_hot.get(id, false))
+        var body_on := id == "body" and body_mode
         var base := GLASS_HOT if hot else GLASS
+        if body_on:
+            base = Color(0.98, 0.75, 0.14, 0.58)
         pad.draw_circle(c, r, base)
-        var ring := AMBER if (hot or id == "jab") else Color(0.86, 0.90, 1.0, 0.55)
+        var ring := AMBER if (hot or id == "jab" or body_on) else Color(0.86, 0.90, 1.0, 0.55)
         pad.draw_arc(c, r, 0.0, TAU, 40, ring, 3.0, true)
+        if id == "body" and body_mode:
+            # включённый корпус подсвечивает и сами удары — чтобы не забыть
+            pad.draw_arc(c, r - 8.0, 0.0, TAU, 32, Color(0.99, 0.86, 0.45), 2.0, true)
         var f: SystemFont = font_b if id != "pause" else font_b
-        var size := 17 if id != "pause" else 22
+        var size := 16 if id == "body" else (17 if id != "pause" else 22)
         var tw := f.get_string_size(String(b["label"]), HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+        var col := TEXT
+        if body_on:
+            col = Color(0.07, 0.08, 0.12)
         pad.draw_string(f, c + Vector2(-tw * 0.5, size * 0.36), String(b["label"]),
-                HORIZONTAL_ALIGNMENT_LEFT, -1, size, TEXT)
+                HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
 
     # стик движения
     pad.draw_circle(STICK_POS, STICK_R, Color(0.04, 0.05, 0.08, 0.34))
