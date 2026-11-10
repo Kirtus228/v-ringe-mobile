@@ -325,6 +325,30 @@ func _gear_button() -> void:
             on_button.call("settings"))
 
 
+## Кнопка «назад» в левом верхнем углу — общая для всех экранов, кроме меню и боя.
+func _back_btn() -> Button:
+    return _btn(Lang.t("back_btn"), Vector2(18, 12), Vector2(148, 42), "back_all")
+
+
+## Прозрачная зона нажатия поверх строки списка: работает и мышью, и пальцем.
+func _hit(x: float, y: float, w: float, h: float, id: String) -> Button:
+    var b := Button.new()
+    b.text = ""
+    b.position = Vector2(x, y)
+    b.size = Vector2(w, h)
+    b.focus_mode = Control.FOCUS_NONE
+    b.flat = true
+    var empty := StyleBoxEmpty.new()
+    for s in ["normal", "hover", "pressed", "focus", "disabled"]:
+        b.add_theme_stylebox_override(s, empty)
+    b.mouse_filter = Control.MOUSE_FILTER_STOP
+    b.pressed.connect(func() -> void:
+        if on_button.is_valid():
+            on_button.call(id))
+    overlay.add_child(b)
+    return b
+
+
 func show_menu(d: Dictionary) -> void:
     _clear_overlay()
     var k: Dictionary = d.get("keys", {})
@@ -408,6 +432,7 @@ func show_menu(d: Dictionary) -> void:
 func show_prefight(d: Dictionary) -> void:
     _clear_overlay()
     _dim()
+    _back_btn()
     var tip := String(d.get("tip", ""))
     var belt: int = int(d.get("belt", 0))
     var belt_name := String(d.get("belt_name", ""))
@@ -434,6 +459,7 @@ func show_prefight(d: Dictionary) -> void:
 func show_tournaments(d: Dictionary) -> void:
     _clear_overlay()
     _dim()
+    _back_btn()
     var rows: Array = d.get("rows", [])
     var sel: int = int(d.get("sel", 0))
     var msg := String(d.get("msg", ""))
@@ -460,15 +486,18 @@ func show_tournaments(d: Dictionary) -> void:
         elif tag.begins_with("В ХОДЕ"):
             tag = tag.replace("В ХОДЕ", Lang.t("tour_progress").to_upper())
         _overlay_label(tag, 830, y + 8, 270, 13, tag_col, HORIZONTAL_ALIGNMENT_RIGHT, true)
+        _hit(162, y - 12, 956, 92, "tourrow%d" % i)
     if msg != "":
         _overlay_label(msg, 0, 476, W, 14, AMBER)
     _btn(Lang.t("tour_start"), Vector2(470, 512), Vector2(340, 64), "tourstart", "cta")
-    _overlay_label(Lang.t("tour_hint"), 0, 596, W, 12, MUTED)
+    var thint := Lang.t("touch_tour_hint") if bool(d.get("touch", false)) else Lang.t("tour_hint")
+    _overlay_label(thint, 0, 596, W, 12, MUTED)
 
 ## История: пролог и главы, открываются по поясам.
 func show_story(d: Dictionary) -> void:
     _clear_overlay()
     _dim()
+    _back_btn()
     var pages: Array = d.get("pages", [])
     var sel: int = clampi(int(d.get("sel", 0)), 0, maxi(0, pages.size() - 1))
     var page: Dictionary = pages[sel] if pages.size() > 0 else {}
@@ -512,11 +541,15 @@ func show_story(d: Dictionary) -> void:
         _overlay_rect(x0 + float(i) * step - 4.0, 542, 8, 8, col)
     _overlay_label(Lang.t("story_hint"), 0, 566, W, 12, MUTED)
     _btn(Lang.t("back"), Vector2(578, 606), Vector2(124, 44), "storyback")
+    # листание глав пальцем: тап по широким полосам слева и справа от листа
+    _hit(20, 126, 92, 396, "storyprev")
+    _hit(1168, 126, 92, 396, "storynext")
 
 
 func show_pause() -> void:
     _clear_overlay()
     _dim()
+    _back_btn()
     _overlay_label(Lang.t("paused"), 0, 200, W, 44, TEXT)
     _btn(Lang.t("resume"), Vector2(540, 268), Vector2(200, 52), "resume")
     _btn(Lang.t("settings"), Vector2(540, 332), Vector2(200, 46), "settings")
@@ -529,6 +562,7 @@ func show_pause() -> void:
 func show_howto(d: Dictionary) -> void:
     _clear_overlay()
     _dim()
+    _back_btn()
     var k: Dictionary = d.get("keys", {})
     if k.is_empty():
         k = {"move": "WASD", "dodge": "SHIFT", "block": "L", "jab": "J",
@@ -579,6 +613,7 @@ func show_result(d: Dictionary) -> void:
     _clear_overlay()
     _dim()
     _gear_button()
+    _back_btn()
     var kind := String(d.get("kind", "win"))
     var win: bool = kind == "win" or kind == "timewin" or kind == "ringout"
     var title := Lang.t("win")
@@ -742,6 +777,7 @@ func show_locker(d: Dictionary) -> void:
         _overlay_label(String(cat["name"]), 70, y, 250, 15, col, HORIZONTAL_ALIGNMENT_LEFT, i == ci)
         _overlay_label(str(got) + "/" + str(cat["items"].size()), 300, y + 2, 60, 10, MUTED,
                 HORIZONTAL_ALIGNMENT_RIGHT)
+        _hit(52, y - 6, 316, 38, "lockercat%d" % i)
 
     # варианты выбранного раздела
     var cat_now: Dictionary = cats[ci]
@@ -780,20 +816,25 @@ func show_locker(d: Dictionary) -> void:
             tag = str(it["price"]) + " очк."
             tag_col = AMBER if coins >= int(it["price"]) else RED
         _overlay_label(tag, 1060, y + 2, 150, 10, tag_col, HORIZONTAL_ALIGNMENT_RIGHT)
+        _hit(912, y - 6, 316, 38, "lockeritem%d" % i)
 
     _overlay_label("очки дают за матчи: победа, нокдаун и вылет за канаты — дороже",
             924, 570, 292, 10, MUTED, HORIZONTAL_ALIGNMENT_LEFT, false)
 
     if msg != "":
         _overlay_label(msg, 0, 642, W, 15, msg_col)
-    _overlay_label("↑↓ раздел      ←→ вариант      ENTER — надеть / купить      ESC — назад",
-            0, 678, W, 14, Color(0.72, 0.78, 0.88))
+    var lhint := "↑↓ раздел      ←→ вариант      ENTER — надеть / купить      ESC — назад"
+    if bool(d.get("touch", false)):
+        lhint = Lang.t("touch_locker_hint")
+    _overlay_label(lhint, 0, 678, W, 14, Color(0.72, 0.78, 0.88))
+    _btn(Lang.t("back_btn"), Vector2(18, 664), Vector2(148, 42), "back_all")
 
 
 ## Окно настроек: вкладки «управление» и «звук», вызывается шестерёнкой.
 func show_settings(d: Dictionary) -> void:
     _clear_overlay()
     _dim()
+    _back_btn()
     var tab: int = int(d.get("tab", 0))
     _overlay_label(Lang.t("settings"), 0, 18, W, 26, ACCENT)
     _overlay_label(Lang.t("settings_sub"), 0, 50, W, 12, MUTED)
@@ -901,9 +942,14 @@ func _settings_sound(d: Dictionary) -> void:
             var on: bool = b < int(vals[i])
             _overlay_rect(556 + float(b) * 38, y - 8, 30, 24,
                     ACCENT if on else Color(1, 1, 1, 0.12))
+            # тап по делению сразу ставит громкость
+            _hit(556 + float(b) * 38, y - 8, 30, 24, "snd:%d:%d" % [i, b + 1])
         _overlay_label(str(vals[i]) + "/10", 944, y - 12, 80, 18, AMBER, HORIZONTAL_ALIGNMENT_RIGHT)
 
-    _overlay_label(Lang.t("sound_hint"), 0, 500, W, 14, Color(0.72, 0.78, 0.88))
+    var shint := Lang.t("sound_hint")
+    if bool(d.get("touch", false)):
+        shint = Lang.t("touch_sound_hint")
+    _overlay_label(shint, 0, 500, W, 14, Color(0.72, 0.78, 0.88))
     _overlay_label(Lang.t("sound_alive"), 0, 530, W, 12, MUTED)
     _overlay_label(Lang.t("back"), 0, 586, W, 14, Color(0.72, 0.78, 0.88))
 
@@ -914,24 +960,38 @@ func _settings_game(d: Dictionary) -> void:
     var lang: String = String(d.get("lang", "ru"))
     var full: bool = bool(d.get("fullscreen", false))
     _overlay_rect(238, 144, 804, 380, Color(0.03, 0.04, 0.06, 0.80))
-    var names := [Lang.t("language"), Lang.t("fullscreen")]
+    var armed := bool(d.get("reset_armed", false))
+    var names := [Lang.t("language"), Lang.t("fullscreen"), Lang.t("reset_progress")]
     var vals := ["РУССКИЙ" if lang == "ru" else "ENGLISH",
-            Lang.t("on") if full else Lang.t("off")]
-    for i in 2:
+            Lang.t("on") if full else Lang.t("off"),
+            Lang.t("reset_armed") if armed else "—"]
+    for i in 3:
         var y := 186.0 + float(i) * 96.0
+        var row_col := TEXT if i < 2 else (RED if armed else Color(0.86, 0.62, 0.62))
         if i == sel:
             _overlay_rect(268, y - 24, 744, 70, Color(ACCENT.r, ACCENT.g, ACCENT.b, 0.14))
             _overlay_rect(268, y - 24, 4, 70, ACCENT)
-        _overlay_label(names[i], 300, y - 8, 300, 20, TEXT, HORIZONTAL_ALIGNMENT_LEFT, i == sel)
+        _overlay_label(names[i], 300, y - 8, 300, 20, row_col, HORIZONTAL_ALIGNMENT_LEFT, i == sel)
         _overlay_label(vals[i], 760, y - 8, 220, 18, AMBER, HORIZONTAL_ALIGNMENT_RIGHT)
-        _overlay_label(Lang.t("lang_hint") if i == 0 else Lang.t("full_hint"),
-                300, y + 26, 600, 11, MUTED, HORIZONTAL_ALIGNMENT_LEFT, false)
-    _overlay_label(Lang.t("game_hint"), 0, 452, W, 14, Color(0.72, 0.78, 0.88))
+        var sub := ""
+        if i == 0:
+            sub = Lang.t("lang_hint")
+        elif i == 1:
+            sub = Lang.t("full_hint")
+        else:
+            sub = "нажми ещё раз, чтобы стереть всё" if not Lang.is_en() else "press again to wipe everything"
+        _overlay_label(sub, 300, y + 26, 600, 11, MUTED, HORIZONTAL_ALIGNMENT_LEFT, false)
+        _hit(268, y - 24, 744, 70, "gamerow%d" % i)
+    var ghint := Lang.t("game_hint")
+    if bool(d.get("touch", false)):
+        ghint = Lang.t("touch_game_hint")
+    _overlay_label(ghint, 0, 470, W, 14, Color(0.72, 0.78, 0.88))
 
 ## Прокачка за «форму»: пять параметров, четыре уровня, цена растёт.
 func show_upgrades(d: Dictionary) -> void:
     _clear_overlay()
     _dim()
+    _back_btn()
     var rows: Array = d.get("rows", [])
     var sel: int = int(d.get("sel", 0))
     var form_v: int = int(d.get("form", 0))
@@ -966,11 +1026,14 @@ func show_upgrades(d: Dictionary) -> void:
         _overlay_label(tag, 940, y, 140, 15, tag_col, HORIZONTAL_ALIGNMENT_RIGHT)
         _overlay_label("ур. " + str(lvl) + "/" + str(lmax), 830, y + 24, 100, 10, MUTED,
                 HORIZONTAL_ALIGNMENT_RIGHT)
+        _hit(196, y - 10, 888, 62, "upgrow%d" % i)
 
     if msg != "":
         _overlay_label(msg, 0, 540, W, 15, msg_col)
-    _overlay_label("↑↓ — выбрать      ENTER — купить уровень      ESC — назад",
-            0, 580, W, 14, Color(0.72, 0.78, 0.88))
+    var uhint := "↑↓ — выбрать      ENTER — купить уровень      ESC — назад"
+    if bool(d.get("touch", false)):
+        uhint = Lang.t("touch_upg_hint")
+    _overlay_label(uhint, 0, 580, W, 14, Color(0.72, 0.78, 0.88))
     _overlay_label("форму дают: попадания в тренировке (2 за удар, 4 в голову) и каждый бой",
             0, 612, W, 11, MUTED)
 

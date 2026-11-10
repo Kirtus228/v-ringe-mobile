@@ -832,7 +832,7 @@ func _tour_data() -> Dictionary:
                 "reward": str(int(t["coins"])) + " монет · " + str(int(t["form"])) + " формы",
                 "state": state_txt, "open": open, "need": int(t["need"]) + 1,
                 "fights": int(t["fights"]), "done": _tour_done(id)})
-    return {"rows": rows, "sel": tour_sel, "belt": belt, "msg": tour_msg}
+    return {"rows": rows, "sel": tour_sel, "belt": belt, "msg": tour_msg, "touch": touch_ui}
 
 
 ## Старт турнирного боя: сначала карточка с советом тренера.
@@ -1032,6 +1032,82 @@ func _on_hud_button(id: String) -> void:
             _settings_tab(1)
         "tab2":
             _settings_tab(2)
+        # --- мобильные нажатия
+        "back_all":
+            _back_any()
+        "storyprev":
+            _story_step(-1)
+        "storynext":
+            _story_step(1)
+        "gamerow0":
+            game_sel = 0
+            _game_activate()
+        "gamerow1":
+            game_sel = 1
+            _game_activate()
+        "gamerow2":
+            game_sel = 2
+            _game_activate()
+        _:
+            _touch_row_button(id)
+
+
+## Тап по строке списка: прокачка, гардероб, ползунок громкости.
+func _touch_row_button(id: String) -> void:
+    if id.begins_with("upgrow"):
+        upgrade_sel = clampi(int(id.substr(6)), 0, UPGRADES.size() - 1)
+        _upgrade_buy()
+    elif id.begins_with("lockercat"):
+        locker_sel = clampi(int(id.substr(9)), 0, LookScript.CATALOG.size() - 1)
+        locker_opt = 0
+        hud.show_locker(_locker_data())
+    elif id.begins_with("lockeritem"):
+        var cat_now: Dictionary = LookScript.CATALOG[clampi(locker_sel, 0, LookScript.CATALOG.size() - 1)]
+        locker_opt = clampi(int(id.substr(10)), 0, (cat_now["items"] as Array).size() - 1)
+        _locker_apply()
+    elif id.begins_with("snd:"):
+        var parts: PackedStringArray = id.split(":")
+        if parts.size() == 3:
+            var row := int(parts[1])
+            var val := clampi(int(parts[2]), 0, 10)
+            sound_sel = clampi(row, 0, 1)
+            if sound_sel == 0:
+                music_vol = val
+            else:
+                sfx_vol = val
+            _apply_sound()
+            _save_sound()
+            if sound_sel == 1:
+                sfx.play("hit", 1.0, -6.0)
+            _refresh_settings()
+
+
+## «← НАЗАД» на экране: ведёт себя как Esc в этом состоянии.
+func _back_any() -> void:
+    match state:
+        St.PAUSE:
+            _set_state(St.FIGHT)
+        St.SETTINGS:
+            _close_settings()
+        St.UPGRADE:
+            _close_upgrades()
+        St.CUSTOM:
+            _close_locker()
+        St.HOWTO:
+            _close_howto()
+        St.TOUR:
+            _close_tournaments()
+        St.STORY:
+            _close_story()
+        St.PREFIGHT:
+            _prefight_key(KEY_ESCAPE)
+        St.RESULT:
+            _leave_to_menu()
+
+
+func _story_step(dir: int) -> void:
+    story_sel = wrapi(story_sel + dir, 0, StoryScript.PAGES.size())
+    hud.show_story(_story_data())
 
 
 func _open_howto() -> void:
@@ -1181,6 +1257,8 @@ func _apply_forced_state() -> void:
     elif forced_state == "story":
         story_sel = 0
         _set_state(St.STORY)
+    elif forced_state == "upgrade":
+        _open_upgrades()
     elif forced_state == "leave":
         _start_fight()
         _set_state(St.PAUSE)
@@ -2040,7 +2118,7 @@ func _settings_data() -> Dictionary:
             "sound_sel": sound_sel, "rows": [], "sel": key_sel, "wait": key_wait,
             "msg": keys_msg, "msg_col": keys_msg_col,
             "lang": lang_code, "fullscreen": fullscreen, "game_sel": game_sel,
-            "reset_armed": reset_armed > 0.0}
+            "reset_armed": reset_armed > 0.0, "touch": touch_ui}
     if settings_tab == 0:
         var rows: Array = []
         for a in ACTIONS:
@@ -2718,7 +2796,7 @@ func _preview_look() -> Dictionary:
 func _locker_data() -> Dictionary:
     return {"cat": locker_sel, "idx": locker_opt, "owned": owned, "look": look,
             "coins": coins, "wins": wins, "matches": matches,
-            "msg": locker_msg, "msg_col": locker_msg_col}
+            "msg": locker_msg, "msg_col": locker_msg_col, "touch": touch_ui}
 
 
 func _open_locker() -> void:
@@ -2860,15 +2938,20 @@ func _game_key(code: int) -> void:
             game_sel = wrapi(game_sel + 1, 0, 3)
             _refresh_settings()
         KEY_LEFT, KEY_RIGHT, KEY_ENTER, KEY_SPACE:
-            if game_sel == 0:
-                _set_lang("en" if lang_code == "ru" else "ru")
-            elif game_sel == 1:
-                _toggle_fullscreen()
-                _refresh_settings()
-            else:
-                _arm_reset()
+            _game_activate()
         KEY_ESCAPE:
             _close_settings()
+
+
+## Действие выбранной строки вкладки «игра» — и клавишей, и тапом.
+func _game_activate() -> void:
+    if game_sel == 0:
+        _set_lang("en" if lang_code == "ru" else "ru")
+    elif game_sel == 1:
+        _toggle_fullscreen()
+        _refresh_settings()
+    else:
+        _arm_reset()
 
 
 func _sound_key(code: int) -> void:
@@ -2910,7 +2993,7 @@ func _upgrades_data() -> Dictionary:
         rows.append({"name": String(u["name"]), "desc": String(u["desc"]),
                 "lvl": int(upg.get(uid, 0)), "max": UPG_MAX, "cost": _upg_cost(uid)})
     return {"rows": rows, "sel": upgrade_sel, "form": form,
-            "msg": upgrade_msg, "msg_col": upgrade_msg_col}
+            "msg": upgrade_msg, "msg_col": upgrade_msg_col, "touch": touch_ui}
 
 
 func _open_upgrades() -> void:
@@ -3557,6 +3640,62 @@ func _run_touchtest() -> void:
     var pause_ok: bool = state == St.PAUSE and not touch.active
     print("TOUCHTEST пауза: state=", state, " touch_active=", touch.active)
     ok = ok and jab_ok and stick_ok and block_ok and dodge_ok and pause_ok
+
+    # --- экраны меню пальцем: прокачка, гардероб, настройки, турниры, история
+    _leave_to_menu()
+    form = 500
+    _on_hud_button("upgrade")
+    var up_open: bool = state == St.UPGRADE
+    var lvl_before := int(upg["power"])
+    _on_hud_button("upgrow0")
+    var up_buy: bool = int(upg["power"]) == lvl_before + 1
+    print("TOUCHTEST прокачка: экран=", up_open, " уровень=", lvl_before, "→", int(upg["power"]))
+    _on_hud_button("back_all")
+    var up_back: bool = state == St.MENU
+
+    _on_hud_button("locker")
+    var lock_open: bool = state == St.CUSTOM
+    _on_hud_button("lockercat2")
+    _on_hud_button("lockeritem1")
+    var lock_tap: bool = state == St.CUSTOM
+    print("TOUCHTEST гардероб: экран=", lock_open, " тап по вещи=", lock_tap)
+    _on_hud_button("back_all")
+    var lock_back: bool = state == St.MENU
+
+    _on_hud_button("settings")
+    var set_open: bool = state == St.SETTINGS
+    _on_hud_button("gamerow0")
+    var lang_flip: bool = lang_code == "en"
+    _on_hud_button("gamerow0")
+    var lang_back: bool = lang_code == "ru"
+    print("TOUCHTEST настройки: экран=", set_open, " язык en=", lang_flip, " назад ru=", lang_back)
+    _on_hud_button("back_all")
+    var set_back: bool = state == St.MENU
+
+    _on_hud_button("tour")
+    var tour_open: bool = state == St.TOUR
+    _on_hud_button("tourrow2")
+    var tour_sel_ok: bool = tour_sel == 2
+    _on_hud_button("back_all")
+    var tour_back: bool = state == St.MENU
+
+    _on_hud_button("story")
+    var story_open: bool = state == St.STORY
+    _on_hud_button("storynext")
+    var story_step: bool = story_sel == 1
+    _on_hud_button("storyprev")
+    _on_hud_button("back_all")
+    var story_back: bool = state == St.MENU
+
+    var menu_ok: bool = up_open and up_buy and up_back and lock_open and lock_tap and lock_back \
+            and set_open and lang_flip and lang_back and set_back and tour_open and tour_sel_ok \
+            and tour_back and story_open and story_step and story_back
+    print("TOUCHTEST меню: прокачка=", up_open and up_buy and up_back,
+            " гардероб=", lock_open and lock_tap and lock_back,
+            " настройки=", set_open and lang_flip and set_back,
+            " турниры=", tour_open and tour_sel_ok and tour_back,
+            " история=", story_open and story_step and story_back)
+    ok = ok and menu_ok
     print("TOUCHTEST ", "ок" if ok else "ОШИБКА")
     get_tree().quit()
 
