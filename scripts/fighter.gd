@@ -29,25 +29,25 @@ const PUNCHES := {
         "stam": 14.0, "dmg": 11.0, "reach": 1.30, "dur": 0.38, "hit_at": 0.19,
         "score": 20, "push": 0.42, "stun": 0.26, "arm": "l",
         "sh": Vector3(1.15, -0.95, -0.30), "el": 1.40,
-        "twist": 0.70, "hip": Vector2(0.17, 0.09),
+        "twist": -0.70, "hip": Vector2(0.17, 0.09),
     },
     "rhook": {
         "stam": 16.0, "dmg": 13.0, "reach": 1.28, "dur": 0.42, "hit_at": 0.21,
         "score": 26, "push": 0.48, "stun": 0.30, "arm": "r",
         "sh": Vector3(1.10, 0.95, 0.10), "el": 1.50,
-        "twist": -0.80, "hip": Vector2(-0.20, 0.11),
+        "twist": 0.80, "hip": Vector2(-0.20, 0.11),
     },
     "upper": {
         "stam": 22.0, "dmg": 15.0, "reach": 1.25, "dur": 0.50, "hit_at": 0.24,
         "score": 30, "push": 0.55, "stun": 0.35, "arm": "r",
         "sh": Vector3(1.28, 0.0, 0.12), "el": 1.15,
-        "twist": -0.32, "hip": Vector2(-0.04, 0.18),
+        "twist": 0.32, "hip": Vector2(-0.04, 0.18),
     },
     "cross": {
         "stam": 15.0, "dmg": 12.0, "reach": 1.52, "dur": 0.36, "hit_at": 0.17,
         "score": 22, "push": 0.40, "stun": 0.24, "arm": "r",
         "sh": Vector3(1.52, 0.02, 0.02), "el": 0.08,
-        "twist": -0.55, "hip": Vector2(-0.12, 0.08),
+        "twist": 0.55, "hip": Vector2(-0.12, 0.08),
     },
 }
 
@@ -72,18 +72,34 @@ const BODY_PUNCHES := {
 ## wind — куда перчатка уходит на замахе, mid — контрольная точка дуги
 ## (прямые удары идут почти по нитке, крюки — по дуге сбоку, апперкот — снизу),
 ## pole — куда смотрит локоть, dip — насколько проседают колени на замахе,
-## drive — насколько корпус идёт вперёд на выносе.
+## drive — насколько корпус идёт вперёд на выносе,
+## turn — насколько всё тело доворачивается в сторону удара (радианы, знак:
+## + вперёд идёт правая сторона, − левая), pivot — доворот стопы ударной
+## ноги на носке (пятка наружу), heel — подъём пятки, foot — какая стопа
+## работает: "front" (передняя) или "back" (задняя).
+##
+## Цифры взяты из техники бокса: джеб почти без доворота, только лёгкий
+## пивот задней ноги; кросс — пятка задней ноги разворачивается наружу,
+## таз и корпус идут за ней, рука вылетает последней; хук — вес на переднюю
+## ногу, таз и плечи резко доворачиваются, передняя стопа разворачивается
+## внутрь на носке, локоть ~90°; апперкот — присед, таз поворачивается,
+## пятка задней ноги поднимается, рука идёт снизу вверх по дуге.
 const PUNCH_PATH := {
     "jab": {"wind": Vector3(-0.11, 0.02, 0.30), "mid": Vector3(-0.04, 0.0, 0.03),
-        "pole": Vector3(0.30, -0.90, 0.20), "dip": 0.05, "drive": 0.30},
+        "pole": Vector3(0.30, -0.90, 0.20), "dip": 0.05, "drive": 0.30,
+        "turn": -0.12, "pivot": 0.16, "heel": 0.06, "foot": "back"},
     "cross": {"wind": Vector3(0.15, -0.01, 0.34), "mid": Vector3(0.06, 0.0, 0.04),
-        "pole": Vector3(0.35, -0.90, 0.25), "dip": 0.08, "drive": 0.55},
+        "pole": Vector3(0.35, -0.90, 0.25), "dip": 0.08, "drive": 0.55,
+        "turn": 0.38, "pivot": 0.50, "heel": 0.34, "foot": "back"},
     "lhook": {"wind": Vector3(-0.50, -0.20, 0.26), "mid": Vector3(-0.40, -0.03, 0.02),
-        "pole": Vector3(-0.85, -0.45, 0.15), "dip": 0.22, "drive": 0.40},
+        "pole": Vector3(-0.85, -0.45, 0.15), "dip": 0.22, "drive": 0.40,
+        "turn": -0.34, "pivot": 0.44, "heel": 0.14, "foot": "front"},
     "rhook": {"wind": Vector3(0.50, -0.20, 0.26), "mid": Vector3(0.40, -0.03, 0.02),
-        "pole": Vector3(0.85, -0.45, 0.15), "dip": 0.22, "drive": 0.40},
+        "pole": Vector3(0.85, -0.45, 0.15), "dip": 0.22, "drive": 0.40,
+        "turn": 0.36, "pivot": 0.42, "heel": 0.20, "foot": "back"},
     "upper": {"wind": Vector3(0.16, -0.55, 0.22), "mid": Vector3(0.07, -0.22, -0.04),
-        "pole": Vector3(0.20, -1.0, 0.50), "dip": 0.34, "drive": 0.55},
+        "pole": Vector3(0.20, -1.0, 0.50), "dip": 0.34, "drive": 0.55,
+        "turn": 0.30, "pivot": 0.40, "heel": 0.30, "foot": "back"},
 }
 
 const SH_GUARD_L := Vector3(0.50, 0.0, 0.0)
@@ -1258,6 +1274,10 @@ func _animate(dt: float) -> void:
 
     var ptwist := 0.0
     var pshift := Vector2.ZERO
+    var body_turn := 0.0
+    var foot_side := ""
+    var foot_yaw := 0.0
+    var foot_heel := 0.0
     var arm_ext := 0.0
     var arm_side := ""
     var q_l: Variant = null
@@ -1282,6 +1302,13 @@ func _animate(dt: float) -> void:
         arm_side = punch_arm
         ptwist = float(p.get("twist", 0.0)) * float(d["tw"])
         pshift = p.get("hip", Vector2.ZERO) * float(d["sh"])
+        # всё тело доворачивается в сторону удара, ударная стопа разворачивается
+        # на носке и приподнимает пятку — как в технике бокса
+        var path_turn := float(path.get("turn", 0.0))
+        body_turn = path_turn * float(d["tw"])
+        foot_side = "l" if str(path.get("foot", "back")) == "front" else "r"
+        foot_yaw = signf(path_turn) * float(path.get("pivot", 0.0)) * float(d["tw"])
+        foot_heel = float(path.get("heel", 0.0)) * float(d["hit"])
         # вторая рука остаётся в стойке у подбородка: поджимается и уходит
         # чуть назад, а не тянется вперёд — иначе кажется, что бьют двумя руками
         if punch_arm == "l":
@@ -1339,7 +1366,7 @@ func _animate(dt: float) -> void:
     if ko or fallen:
         _fall_pose(dt)
     else:
-        _apply_rig(ptwist, pshift)
+        _apply_rig(ptwist, pshift, body_turn, foot_side, foot_yaw, foot_heel)
 
     # плечо выносится вперёд на удар — перчатка достаёт до головы цели.
     # Сглаживаем, иначе плечо прыгает на 13 см за пару кадров и рука дёргается.
@@ -1384,7 +1411,7 @@ func _animate(dt: float) -> void:
     if has_aim:
         # на выносе рука догоняет цель быстро (контактный кадр точный), на замахе
         # и возврате — обычное сглаживание, чтобы не дёргалось
-        arm_k = clampf(maxf(k, clampf(float(pun_d["ext"]), 0.0, 1.0) * 0.85), 0.0, 1.0)
+        arm_k = clampf(maxf(k, clampf(float(pun_d["ext"]), 0.0, 1.0) * 0.60), 0.0, 1.0)
 
     _apply_pose(l_sh, l_el, r_sh, r_el, k, q_l, q_r, arm_k)
 
@@ -1439,7 +1466,8 @@ func _leg_ik(th: Node3D, kn: Node3D, ft: Node3D, target: Vector3) -> void:
     ft.basis = chain.inverse()
 
 
-func _apply_rig(twist: float, shift: Vector2) -> void:
+func _apply_rig(twist: float, shift: Vector2, body_turn := 0.0,
+        foot_side := "", foot_yaw := 0.0, foot_heel := 0.0) -> void:
     var pl := to_local(rj_pelvis.p) + Vector3(shift.x * 0.6, 0.0, shift.y * 0.6)
     hips.position = pl
     hips.rotation = Vector3(-_lean.y * 0.40, twist * 0.35, -_lean.x * 0.40)
@@ -1452,13 +1480,15 @@ func _apply_rig(twist: float, shift: Vector2) -> void:
     torso.basis = Basis(Quaternion(Vector3.UP, up_t.normalized())) \
             * Basis(Vector3.UP, twist) * Basis.from_euler(tb)
 
-    # голова — отдельная масса: кивает, отстаёт, дёргается от удара
+    # голова — отдельная масса: кивает, отстаёт, дёргается от удара.
+    # При довороте тела в удар голова чуть отстаёт, но взгляд держит цель.
     var up_h: Vector3 = torso.to_local(rj_head.p) - head.position
     if up_h.length() < 0.05:
         up_h = Vector3.UP
     var hb := wob_head.step(_dt, 46.0, 5.5)
     head.basis = Basis(Quaternion(Vector3.UP, up_h.normalized())) \
-            * Basis.from_euler(Vector3(-0.30 * _hit_t + hb.x, hb.y, hb.z))
+            * Basis.from_euler(Vector3(-0.30 * _hit_t + hb.x, hb.y, hb.z)) \
+            * Basis(Vector3.UP, -body_turn * 0.65)
 
     # руки отстают от корпуса: плечи болтаются
     var dv: Vector3 = global_transform.basis.inverse() * (rj_chest.p - _chest_prev)
@@ -1468,8 +1498,14 @@ func _apply_rig(twist: float, shift: Vector2) -> void:
 
     _leg_ik(th_l, kn_l, ft_l, rj_foot_l.p)
     _leg_ik(th_r, kn_r, ft_r, rj_foot_r.p)
+    # стопа ударной ноги разворачивается на носке (пятка наружу) и поднимает
+    # пятку — тело доворачивается вокруг врытой в пол стопы, а не «в воздухе»
+    if foot_side == "l":
+        ft_l.basis = ft_l.basis * Basis(Vector3.UP, foot_yaw) * Basis(Vector3.RIGHT, -foot_heel)
+    elif foot_side == "r":
+        ft_r.basis = ft_r.basis * Basis(Vector3.UP, foot_yaw) * Basis(Vector3.RIGHT, -foot_heel)
     body.position = Vector3.ZERO
-    body.rotation = Vector3.ZERO
+    body.rotation = Vector3(0.0, body_turn, 0.0)
 
 
 func _fall_pose(dt: float) -> void:

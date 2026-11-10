@@ -1896,7 +1896,11 @@ func _run_pose_sheet() -> void:
                 " torsoY=", player.torso.global_transform.basis.y.snapped(Vector3(0.01, 0.01, 0.01)),
                 " head=", player.head.global_position.snapped(Vector3(0.01, 0.01, 0.01)),
                 " glove=", player.glove_point(str(player.punch_info(pose_mode)["arm"])).snapped(Vector3(0.01, 0.01, 0.01)),
-                " aim=", player.punch_aim.snapped(Vector3(0.01, 0.01, 0.01)))
+                " aim=", player.punch_aim.snapped(Vector3(0.01, 0.01, 0.01)),
+                " shz=", snappedf(player.sh_l.global_position.z - player.position.z, 0.01),
+                "/", snappedf(player.sh_r.global_position.z - player.position.z, 0.01),
+                " byaw=", snappedf(player.body.rotation.y, 0.01),
+                " hyaw=", snappedf(player.hips.rotation.y, 0.01))
     print("POSESHEET done")
     get_tree().quit()
 
@@ -3169,10 +3173,16 @@ func _update_camera(delta: float) -> void:
         cam.look_at(Vector3(0.0, 1.16, 0.06), Vector3.UP)
         return
     if cam_mode == "top":
-        # вид сверху: видно дугу бокового удара и замах
+        # вид сверху: видно дугу удара, доворот тела и пивот стопы
+        cam.fov = 46.0
+        cam.position = Vector3(1.1, 6.6, 3.1)
+        cam.look_at(Vector3(0.04, 1.05, 0.05), Vector3.UP)
+        return
+    if cam_mode == "face":
+        # вид спереди-сбоку: видно, как корпус и стопы разворачиваются в удар
         cam.fov = 50.0
-        cam.position = Vector3(0.25, 4.3, 1.15)
-        cam.look_at(Vector3(0.06, 1.15, -0.02), Vector3.UP)
+        cam.position = Vector3(2.5, 1.45, -1.15)
+        cam.look_at(Vector3(0.0, 1.12, 0.35), Vector3.UP)
         return
     if cam_mode == "profile" or cam_mode == "profile2":
         # чистый профиль бойца вплотную: для съёмки траектории удара
