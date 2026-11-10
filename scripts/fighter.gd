@@ -43,6 +43,28 @@ const PUNCHES := {
         "sh": Vector3(1.28, 0.0, 0.12), "el": 1.15,
         "twist": -0.32, "hip": Vector2(-0.04, 0.18),
     },
+    "cross": {
+        "stam": 15.0, "dmg": 12.0, "reach": 1.52, "dur": 0.36, "hit_at": 0.17,
+        "score": 22, "push": 0.40, "stun": 0.24, "arm": "r",
+        "sh": Vector3(1.52, 0.02, 0.02), "el": 0.08,
+        "twist": -0.55, "hip": Vector2(-0.12, 0.08),
+    },
+}
+
+## Удары в корпус: то же движение, но цель ниже и урон/выносливость другие.
+## "base" — какой удар анимируется, "stam_hit" — сколько выносливости снимает
+## чистый корпусной удар (в дополнение к обычному урону).
+const BODY_PUNCHES := {
+    "body_jab": {"base": "jab", "dmg": 6.5, "reach": 1.42, "dur": 0.30, "hit_at": 0.14,
+        "score": 8, "push": 0.22, "stun": 0.12, "stam": 8.0, "stam_hit": 12.0},
+    "body_cross": {"base": "cross", "dmg": 10.0, "reach": 1.50, "dur": 0.38, "hit_at": 0.18,
+        "score": 18, "push": 0.34, "stun": 0.18, "stam": 13.0, "stam_hit": 16.0},
+    "body_lhook": {"base": "lhook", "dmg": 9.5, "reach": 1.28, "dur": 0.40, "hit_at": 0.20,
+        "score": 18, "push": 0.38, "stun": 0.20, "stam": 13.0, "stam_hit": 15.0},
+    "body_rhook": {"base": "rhook", "dmg": 11.0, "reach": 1.26, "dur": 0.44, "hit_at": 0.22,
+        "score": 22, "push": 0.42, "stun": 0.22, "stam": 15.0, "stam_hit": 17.0},
+    "body_upper": {"base": "upper", "dmg": 12.0, "reach": 1.24, "dur": 0.52, "hit_at": 0.25,
+        "score": 26, "push": 0.48, "stun": 0.26, "stam": 20.0, "stam_hit": 20.0},
 }
 
 const SH_GUARD_L := Vector3(0.50, 0.0, 0.0)
@@ -516,14 +538,29 @@ func set_look(d: Dictionary) -> void:
 
 # ------------------------------------------------------------------ API
 
+## Кэш определений ударов: базовые + корпусные варианты (base + переопределения).
+var _punch_cache: Dictionary = {}
+
+
 func punch_info(kind: String) -> Dictionary:
-    return PUNCHES.get(kind, PUNCHES["jab"])
+    if _punch_cache.is_empty():
+        for k in PUNCHES:
+            _punch_cache[k] = PUNCHES[k]
+        for k in BODY_PUNCHES:
+            var b: Dictionary = BODY_PUNCHES[k]
+            var d: Dictionary = PUNCHES[String(b["base"])].duplicate(true)
+            d["body"] = true
+            d["anim"] = String(b["base"])
+            for f in b:
+                d[f] = b[f]
+            _punch_cache[k] = d
+    return _punch_cache.get(kind, PUNCHES["jab"])
 
 
 func start_punch(kind: String, aim: Vector3 = Vector3.ZERO) -> bool:
     if ko or fallen or stun > 0.0 or punch_kind != "" or blocking or evading:
         return false
-    var p: Dictionary = PUNCHES[kind]
+    var p: Dictionary = punch_info(kind)
     if stamina < float(p["stam"]):
         return false
     stamina -= float(p["stam"])
@@ -701,8 +738,8 @@ func reset(spawn: Vector3, hp_value: float) -> void:
 func freeze_pose(kind: String, phase: float) -> void:
     punch_kind = kind
     if kind != "":
-        punch_dur = float(PUNCHES[kind]["dur"])
-        punch_hit_at = float(PUNCHES[kind]["hit_at"])
+        punch_dur = float(punch_info(kind)["dur"])
+        punch_hit_at = float(punch_info(kind)["hit_at"])
         punch_t = punch_dur * phase
     else:
         punch_t = 0.0
@@ -749,7 +786,7 @@ func tick(dt: float) -> void:
 
     if punch_kind != "":
         punch_t += dt
-        var p: Dictionary = PUNCHES[punch_kind]
+        var p: Dictionary = punch_info(punch_kind)
         if not hit_done and punch_t >= punch_hit_at:
             hit_done = true
             impact.emit(punch_kind)
@@ -1134,7 +1171,7 @@ func _animate(dt: float) -> void:
     var q_r: Variant = null
 
     if punch_kind != "":
-        var p: Dictionary = PUNCHES[punch_kind]
+        var p: Dictionary = punch_info(punch_kind)
         var t01 := clampf(punch_t / punch_dur, 0.0, 1.0)
         var ext := _punch_ext(t01)
         var target_sh: Vector3 = p["sh"]
@@ -1172,7 +1209,7 @@ func _animate(dt: float) -> void:
             r_el = lerpf(EL_GUARD_R, EL_OFF_R, ext)
         else:
             var wind := clampf(t01 * 3.0, 0.0, 1.0)
-            if punch_kind == "upper":
+            if str(p.get("anim", punch_kind)) == "upper":
                 r_sh = SH_UPPER_BACK.lerp(SH_GUARD_R, 1.0 - wind).lerp(target_sh, ext)
             else:
                 r_sh = SH_GUARD_R.lerp(target_sh, ext)

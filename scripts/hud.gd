@@ -359,7 +359,7 @@ func show_menu(d: Dictionary) -> void:
     var k: Dictionary = d.get("keys", {})
     if k.is_empty():
         k = {"move": "WASD", "dodge": "SHIFT", "block": "L", "jab": "J",
-            "hook_l": "K", "hook_r": "I", "upper": "U"}
+            "hook_l": "K", "hook_r": "I", "upper": "U", "cross": "E", "body": "Ctrl"}
     var high: int = int(d.get("high", 0))
     var coins: int = int(d.get("coins", 0))
     var form: int = int(d.get("form", 0))
@@ -591,7 +591,7 @@ func show_howto(d: Dictionary) -> void:
     var k: Dictionary = d.get("keys", {})
     if k.is_empty():
         k = {"move": "WASD", "dodge": "SHIFT", "block": "L", "jab": "J",
-            "hook_l": "K", "hook_r": "I", "upper": "U"}
+            "hook_l": "K", "hook_r": "I", "upper": "U", "cross": "E", "body": "Ctrl"}
     _overlay_label(Lang.t("howto"), 0, 26, W, 28, AMBER)
     _overlay_label(Lang.t("howto_sub"), 0, 64, W, 12, MUTED)
 
@@ -608,20 +608,22 @@ func show_howto(d: Dictionary) -> void:
         _overlay_label(String(k["move"]) + " — шаг", 88, 146, 500, 15, TEXT, HORIZONTAL_ALIGNMENT_LEFT, false)
         _overlay_label(String(k["dodge"]) + " — уклон", 88, 176, 500, 15, TEXT, HORIZONTAL_ALIGNMENT_LEFT, false)
         _overlay_label(String(k["block"]) + " — блок (держать)", 88, 206, 500, 15, TEXT, HORIZONTAL_ALIGNMENT_LEFT, false)
-        _overlay_label(String(k["jab"]) + " — джеб    " + String(k["hook_l"]) + " — левый хук",
-                88, 236, 520, 15, TEXT, HORIZONTAL_ALIGNMENT_LEFT, false)
-        _overlay_label(String(k["hook_r"]) + " — правый хук    " + String(k["upper"]) + " — апперкот",
-                88, 266, 520, 15, TEXT, HORIZONTAL_ALIGNMENT_LEFT, false)
+        _overlay_label(String(k["jab"]) + " — джеб    " + String(k["cross"]) + " — кросс",
+                88, 230, 520, 15, TEXT, HORIZONTAL_ALIGNMENT_LEFT, false)
+        _overlay_label(String(k["hook_l"]) + " — левый хук    " + String(k["hook_r"]) + " — правый хук",
+                88, 258, 520, 15, TEXT, HORIZONTAL_ALIGNMENT_LEFT, false)
+        _overlay_label(String(k["upper"]) + " — апперкот    " + String(k["body"]) + "+удар — в корпус",
+                88, 286, 520, 15, TEXT, HORIZONTAL_ALIGNMENT_LEFT, false)
         _overlay_label("Enter / Space — в бой      C — гардероб      P — прокачка      F — тренировка",
-                88, 300, 520, 12, Color(0.70, 0.75, 0.84), HORIZONTAL_ALIGNMENT_LEFT, false)
+                88, 318, 520, 11, Color(0.70, 0.75, 0.84), HORIZONTAL_ALIGNMENT_LEFT, false)
 
     _overlay_rect(656, 104, 560, 232, Color(0.02, 0.03, 0.05, 0.86))
-    var y := 124.0
-    for line in [Lang.t("howto_move"), Lang.t("howto_punch"), Lang.t("howto_rope"),
-            Lang.t("howto_career"), Lang.t("howto_form")]:
+    var y := 122.0
+    for line in [Lang.t("howto_move"), Lang.t("howto_punch"), Lang.t("howto_body"),
+            Lang.t("howto_rope"), Lang.t("howto_career"), Lang.t("howto_form")]:
         _overlay_label("•  " + line, 680, y, 520, 13, Color(0.84, 0.88, 0.95),
                 HORIZONTAL_ALIGNMENT_LEFT, false)
-        y += 42.0
+        y += 36.0
 
     _btn(Lang.t("back"), Vector2(540, 372), Vector2(200, 48), "back")
     _overlay_label(Lang.t("howto_back"), 0, 436, W, 12, MUTED)
@@ -672,9 +674,13 @@ func show_result(d: Dictionary) -> void:
         _overlay_label("+" + str(bonus) + " " + Lang.t("win_bonus"), 0, 164, W, 14, AMBER)
     _overlay_label("+" + str(int(d.get("coin_gain", 0))) + " " + Lang.t("coin_gain"),
             0, 188, W, 17, AMBER)
+    var penalty: int = int(d.get("penalty", 0))
+    if penalty > 0:
+        _overlay_label("−" + str(penalty) + " " + Lang.t("defeat_penalty"),
+                0, 214, W, 15, RED)
     var fg: int = int(d.get("form_gain", 0))
     if fg > 0:
-        _overlay_label("+" + str(fg) + " " + Lang.t("form_gain"), 0, 212, W, 14, ACCENT)
+        _overlay_label("+" + str(fg) + " " + Lang.t("form_gain"), 0, 236, W, 14, ACCENT)
 
     # карьера: где ты по поясам
     var belt: int = int(d.get("belt", 0))
@@ -684,13 +690,13 @@ func show_result(d: Dictionary) -> void:
     var champion: bool = bool(d.get("champion", false))
     if bool(d.get("belt_won", false)) and not champion:
         _overlay_label(Lang.t("belt_won").to_upper() + " · " + belt_name.to_upper(),
-                0, 240, W, 16, AMBER)
+                0, 264, W, 16, AMBER)
     elif champion:
-        _overlay_label(Lang.t("champion"), 0, 240, W, 16, AMBER)
+        _overlay_label(Lang.t("champion"), 0, 264, W, 16, AMBER)
     else:
         _overlay_label(Lang.t("belt") + " " + str(belt + 1) + " · " + belt_name + " · "
                 + str(belt_wins) + " / " + str(int(d.get("belt_fights", 10))),
-                0, 240, W, 14, belt_col)
+                0, 264, W, 14, belt_col)
 
     var tour_txt := String(d.get("tour", ""))
     if tour_txt != "":
@@ -711,7 +717,7 @@ func show_result(d: Dictionary) -> void:
         ["HP" if Lang.is_en() else "ЗДОРОВЬЕ", str(int(d.get("hp", 0))), TEXT],
         [Lang.t("record"), str(int(d.get("high", 0))), TEXT],
     ]
-    var y := 276.0
+    var y := 300.0
     for r in rows:
         _overlay_label(str(r[0]), 320, y, 300, 13, MUTED, HORIZONTAL_ALIGNMENT_RIGHT, false)
         _overlay_label(str(r[1]), 660, y, 300, 17, r[2], HORIZONTAL_ALIGNMENT_LEFT)

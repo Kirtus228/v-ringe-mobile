@@ -227,7 +227,29 @@ const ACTIONS := [
     {"id": "punch_hook_l", "label": "левый хук", "label_en": "left hook", "def": KEY_K, "group": "удары"},
     {"id": "punch_hook_r", "label": "правый хук", "label_en": "right hook", "def": KEY_I, "group": "удары"},
     {"id": "punch_upper", "label": "апперкот", "label_en": "uppercut", "def": KEY_U, "group": "удары"},
+    {"id": "punch_cross", "label": "кросс", "label_en": "cross", "def": KEY_E, "group": "удары"},
 ]
+
+## Корпусные удары: Ctrl + клавиша удара. В Input Map это отдельные действия,
+## поэтому модификатор не путается с обычным ударом и не конфликтует с блоком
+## (L) и уклоном (Shift). Сопоставление: действие -> удар, который анимируется.
+const BODY_ACTIONS := {
+    "punch_body_jab": "jab",
+    "punch_body_cross": "cross",
+    "punch_body_lhook": "lhook",
+    "punch_body_rhook": "rhook",
+    "punch_body_upper": "upper",
+}
+## Удар -> действие, чтобы взять настроенную игроком клавишу.
+const PUNCH_ACTION := {
+    "jab": "punch_jab",
+    "cross": "punch_cross",
+    "lhook": "punch_hook_l",
+    "rhook": "punch_hook_r",
+    "upper": "punch_upper",
+}
+## Модификатор корпусных ударов (одна константа, не разбросан по логике).
+const BODY_MOD_KEY := KEY_CTRL
 ## Эти клавиши заняты меню и в настройку не попадают.
 const RESERVED_KEYS := [KEY_ESCAPE, KEY_ENTER, KEY_KP_ENTER, KEY_SPACE, KEY_C, KEY_T, KEY_R,
         KEY_P, KEY_F, KEY_V, KEY_H, KEY_F1, KEY_F11, KEY_TAB, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT]
@@ -306,6 +328,14 @@ var matches := 0
 var owned: Array = []
 var look: Dictionary = {}
 var coin_gain := 0
+## Штраф за проигранный бой: списывается один раз, не больше, чем есть монет.
+@export var points_loss_on_defeat: int = 40
+var defeat_penalty := 0
+var defeat_penalty_applied := false
+## Буфер ввода удара: короткое окно, чтобы нажатие во время удара не терялось.
+var punch_buf := ""
+var punch_buf_body := false
+var punch_buf_t := 0.0
 var locker_sel := 0
 var locker_opt := 0
 var locker_msg := ""
@@ -352,6 +382,7 @@ var click_test := false
 var career_test := false
 var diff_test := false
 var balance_test := false
+var punch_test := false
 var snd_test := false
 var save_test := false
 var coach_test := false
@@ -486,6 +517,8 @@ func _ready() -> void:
         _run_difftest()
     if balance_test:
         _run_balancetest()
+    if punch_test:
+        _run_punchtest()
     if snd_test:
         _run_sndtest()
     if save_test:
@@ -710,6 +743,10 @@ func _parse_args() -> void:
             belt_override = int(a.substr(7))
         elif a.begins_with("--beltwins="):
             beltwins_override = int(a.substr(11))
+        elif a.begins_with("--penalty="):
+            points_loss_on_defeat = maxi(0, int(a.substr(10)))
+        elif a == "--punchtest":
+            punch_test = true
 
 
 # ---------------------------------------------------------------- сцена
@@ -1245,7 +1282,8 @@ func _result_data() -> Dictionary:
             "belt_won": belt_won, "champion": champion,
             "coach": coach_line, "tour": tour_msg,
             "tour_id": tour_id, "tour_wins": tour_wins,
-            "tour_name": String(_tournament_by_id(tour_id).get("name", ""))}
+            "tour_name": String(_tournament_by_id(tour_id).get("name", "")),
+            "penalty": defeat_penalty}
 
 
 func _howto_data() -> Dictionary:
@@ -1480,6 +1518,11 @@ func _reset_fight() -> void:
     steps_total = 0
     head_hits = 0
     training_hits = 0
+    defeat_penalty = 0
+    defeat_penalty_applied = false
+    punch_buf = ""
+    punch_buf_body = false
+    punch_buf_t = 0.0
     ai = {"state": "wait", "t": 0.9, "pending": "jab", "combo": 0, "counter_ok": false}
     player.preview = false
     player.reset(Vector3(0, 0, 1.9), 100.0)
@@ -1517,7 +1560,8 @@ func _apply_forced_state() -> void:
         player.reset(Vector3(0.02, 0, 0.80), 100.0)
         enemy.reset(Vector3(0.0, 0, -0.45), 110.0)
         _face_each_other()
-        _punch(player, enemy, "jab" if punch_kind_arg == "" else punch_kind_arg)
+        var pk := "jab" if punch_kind_arg == "" else punch_kind_arg
+        _punch(player, enemy, pk, pk.begins_with("body_"))
     elif forced_state == "keys" or forced_state == "settings":
         _open_settings(0)
     elif forced_state == "game" or forced_state == "lang":
@@ -1556,6 +1600,16 @@ func _apply_forced_state() -> void:
         player.hits = 12
         player.taken = 31.0
         player.hp = 69.0
+        _finalize()
+    elif forced_state == "resultlose":
+        # кадр итога поражения: штраф видно, но профиль не пишется (demo)
+        _reset_fight()
+        pending = "lose"
+        score = 480
+        player.hits = 5
+        player.taken = 100.0
+        player.hp = 0.0
+        defeat_penalty = maxi(points_loss_on_defeat, 0)
         _finalize()
     elif forced_state == "chain":
         _start_fight()
@@ -1831,6 +1885,20 @@ func _tick_fight(delta: float) -> void:
         chain_t = maxf(0.0, chain_t - delta)
         if chain_t <= 0.0:
             chain = 0
+
+    # буфер удара: если игрок нажал во время предыдущего удара, дожимаем
+    # нажатие в ближайший свободный кадр (окно 0.16 с), а не выбрасываем его
+    if punch_buf_t > 0.0 and not autoplay:
+        punch_buf_t = maxf(0.0, punch_buf_t - delta)
+        if punch_buf != "" and player.punch_kind == "" and player.stun <= 0.001 \
+                and not player.ko and not player.evading and not player.blocking:
+            var bk := punch_buf
+            var bb := punch_buf_body
+            punch_buf = ""
+            punch_buf_t = 0.0
+            _try_player_punch(bk, bb)
+        elif punch_buf_t <= 0.0:
+            punch_buf = ""
 
     if autoplay:
         _autopilot(delta)
@@ -2326,6 +2394,12 @@ func _unhandled_input(event: InputEvent) -> void:
                 elif state == St.RESULT:
                     _leave_to_menu()
             _:
+                # сначала корпусные (Ctrl+удар) и только с точным модификатором:
+                # иначе Ctrl+J сработал бы и как обычный джеб
+                for bid in BODY_ACTIONS:
+                    if event.is_action_pressed(String(bid), false, true):
+                        _do_body_action(String(bid))
+                        return
                 for a in ACTIONS:
                     if event.is_action_pressed(String(a["id"])):
                         _do_action(String(a["id"]))
@@ -2345,6 +2419,16 @@ func _do_action(id: String) -> void:
             _player_punch("rhook")
         "punch_upper":
             _player_punch("upper")
+        "punch_cross":
+            _player_punch("cross")
+
+
+## Корпусной удар: та же клавиша, но с модификатором, цель — корпус.
+func _do_body_action(id: String) -> void:
+    var kind := String(BODY_ACTIONS.get(id, ""))
+    if kind == "":
+        return
+    _player_punch(kind, true)
 
 
 # ---------------------------------------------------------------- тач
@@ -2388,6 +2472,17 @@ func _apply_input_map() -> void:
         var ev := InputEventKey.new()
         ev.keycode = int(keys[id])
         InputMap.action_add_event(id, ev)
+    # корпусные удары: Ctrl + та же клавиша, что и обычный удар (из настроек).
+    # exact_match при проверке не даст обычному нажатию сработать как корпусное.
+    for bid in BODY_ACTIONS:
+        var base_id := String(PUNCH_ACTION[String(BODY_ACTIONS[bid])])
+        if not InputMap.has_action(bid):
+            InputMap.add_action(bid)
+        InputMap.action_erase_events(bid)
+        var cev := InputEventKey.new()
+        cev.keycode = int(keys.get(base_id, 0))
+        cev.ctrl_pressed = true
+        InputMap.action_add_event(bid, cev)
 
 
 func _save_keys() -> void:
@@ -2429,6 +2524,8 @@ func _keys_text() -> Dictionary:
         "hook_l": _key_name("punch_hook_l"),
         "hook_r": _key_name("punch_hook_r"),
         "upper": _key_name("punch_upper"),
+        "cross": _key_name("punch_cross"),
+        "body": OS.get_keycode_string(BODY_MOD_KEY),
     }
 
 
@@ -2563,16 +2660,30 @@ func _on_step(power: float) -> void:
     sfx.play("step", randf_range(0.88, 1.12), -24.0 + clampf(power, 0.0, 3.0) * 3.0)
 
 
-func _player_punch(kind: String) -> void:
+func _player_punch(kind: String, body: bool = false) -> void:
     if (state != St.FIGHT and state != St.TRAINING) or autoplay:
         return
-    if not _punch(player, enemy, kind):
+    if _try_player_punch(kind, body):
         return
+    # удар не стартовал: идёт предыдущий, не хватает выносливости или игрок
+    # в блоке/уклоне — запоминаем нажатие на короткое окно
+    punch_buf = kind
+    punch_buf_body = body
+    punch_buf_t = 0.16
+
+
+## Запуск удара игрока; true — удар начался. Для корпусного удара kind
+## превращается в body_<kind> и прицел уходит в корпус.
+func _try_player_punch(kind: String, body: bool) -> bool:
+    var full := ("body_" + kind) if body else kind
+    if not _punch(player, enemy, full, body):
+        return false
     if chain_t > 0.0:
         chain = mini(chain + 1, 6)
     else:
         chain = 1
     chain_t = 0.55
+    return true
 
 
 func _on_player_impact(kind: String) -> void:
@@ -2602,6 +2713,8 @@ func _resolve(att: Node3D, def: Node3D, kind: String) -> void:
     if def.ko or def.fallen or att.fallen:
         return
     var p: Dictionary = att.punch_info(kind)
+    var body_punch: bool = kind.begins_with("body_")
+    var anim_kind := String(p.get("anim", kind))
     var dist := _distance()
     if dist > float(p["reach"]):
         sfx.play("whoosh", randf_range(0.9, 1.1), -14.0)
@@ -2615,7 +2728,7 @@ func _resolve(att: Node3D, def: Node3D, kind: String) -> void:
 
     # уклон: прямые и боковые проходят мимо, апперкот достаёт присевшего
     if def.evading:
-        if kind != "upper":
+        if anim_kind != "upper":
             sfx.play("whoosh", randf_range(1.15, 1.3), -13.0)
             _spawn_flash(def.position + Vector3(0, 2.0, 0), Color(0.55, 0.75, 1.0), 1.0)
             return
@@ -2645,19 +2758,23 @@ func _resolve(att: Node3D, def: Node3D, kind: String) -> void:
         return
 
     var dmg2: float = float(p["dmg"]) * att.dmg_mult
-    if def.evading and kind == "upper":
+    if def.evading and anim_kind == "upper":
         dmg2 *= 0.8
     def.take_hit(dmg2, push_dir * float(p["push"]))
+    if body_punch:
+        # корпусной удар бьёт по выносливости: после серии в корпус
+        # соперник дышит, бьёт реже и хуже держит блок
+        def.stamina = maxf(0.0, def.stamina - float(p.get("stam_hit", 10.0)) * att.dmg_mult)
     _clamp_ring(def)
     att.hits += 1
     # хит-стоп и отбрасывание тем сильнее, чем тяжелее удар
-    if kind == "upper":
+    if anim_kind == "upper":
         hitstop = 0.12
         def.push_impulse(push_dir, 5.0)
-    elif kind == "rhook":
+    elif anim_kind == "rhook":
         hitstop = 0.10
         def.push_impulse(push_dir, 4.2)
-    elif kind == "lhook":
+    elif anim_kind == "lhook":
         hitstop = 0.085
         def.push_impulse(push_dir, 3.6)
     else:
@@ -2668,16 +2785,18 @@ func _resolve(att: Node3D, def: Node3D, kind: String) -> void:
     # точка попадания: перчатка в мире, зона по высоте головы
     var gp: Vector3 = att.glove_point(str(p["arm"]))
     var hd: Vector3 = def.head.global_position
-    var head_hit: bool = gp.distance_to(hd) < 0.78 and gp.y > hd.y - 0.38
+    var head_hit: bool = (not body_punch) and gp.distance_to(hd) < 0.78 and gp.y > hd.y - 0.38
     var hit_pos: Vector3 = gp.lerp(hd, 0.45) if head_hit else gp
     if head_hit:
         head_hits += 1
         def.rj_head.v += push_dir * 1.6 + Vector3(0.0, 0.45, 0.0)
-    _spawn_spark(hit_pos, Color(1.0, 0.96, 0.78) if head_hit else Color(1.0, 0.82, 0.6))
+    var spark_col := Color(1.0, 0.96, 0.78) if head_hit else (
+            Color(1.0, 0.62, 0.42) if body_punch else Color(1.0, 0.82, 0.6))
+    _spawn_spark(hit_pos, spark_col)
     _spawn_flash(hit_pos, Color(1.0, 0.85, 0.6), 3.2 if head_hit else 2.4)
     if arena:
-        arena.pulse(0.55 if (kind == "upper" or kind == "rhook") else 0.35)
-    if kind == "upper" or kind == "rhook":
+        arena.pulse(0.55 if (anim_kind == "upper" or anim_kind == "rhook") else 0.35)
+    if anim_kind == "upper" or anim_kind == "rhook":
         if randf() < 0.45:
             sfx.play("gasp", randf_range(0.95, 1.05), -14.0)
 
@@ -2700,8 +2819,8 @@ func _resolve(att: Node3D, def: Node3D, kind: String) -> void:
         def.hp = 0.0
         def.ko = true
         # физический ragdoll: тело падает по-настоящему
-        var imp: Vector3 = push_dir * (2.6 if kind == "upper" else 1.9)
-        imp += Vector3(0.0, 1.9 if kind == "upper" else 1.4, 0.0)
+        var imp: Vector3 = push_dir * (2.6 if anim_kind == "upper" else 1.9)
+        imp += Vector3(0.0, 1.9 if anim_kind == "upper" else 1.4, 0.0)
         if def.has_method("enter_ragdoll"):
             def.enter_ragdoll(imp)
         _end_fight("win" if att == player else "lose", true)
@@ -2734,6 +2853,18 @@ func _end_by_time() -> void:
     _end_fight(kind, false)
 
 
+## Списание очков за поражение. Вызывается из _finalize один раз за бой;
+## флаг defeat_penalty_applied защищает от повторного списания.
+func _apply_defeat_penalty() -> void:
+    if defeat_penalty_applied:
+        return
+    defeat_penalty_applied = true
+    defeat_penalty = clampi(points_loss_on_defeat, 0, coins)
+    coins -= defeat_penalty
+    if defeat_penalty > 0:
+        print("PENALTY поражение: -", defeat_penalty, " монет, осталось ", coins)
+
+
 func _finalize() -> void:
     result_bonus = 0
     if pending == "win":
@@ -2755,6 +2886,7 @@ func _finalize() -> void:
     elif pending == "lose" or pending == "timelose" or pending == "ringoutlose":
         form_gain += 6
     var won := pending == "win" or pending == "ringout" or pending == "timewin"
+    var lost := pending == "lose" or pending == "timelose" or pending == "ringoutlose"
     belt_won = false
     if won and not training and not demo:
         belt_wins += 1
@@ -2771,6 +2903,9 @@ func _finalize() -> void:
     if not no_cash and not demo:
         coins += coin_gain
         form += form_gain
+        # штраф за проигранный бой: один раз, не больше, чем есть монет
+        if lost and not training:
+            _apply_defeat_penalty()
         matches += 1
         if won:
             wins += 1
@@ -2822,9 +2957,14 @@ func _aim_at(f) -> Vector3:
     return f.head.global_position
 
 
-## Запуск удара с прицелом в голову соперника.
-func _punch(att: Node3D, def: Node3D, kind: String) -> bool:
-    return att.start_punch(kind, _aim_at(def))
+## Прицел корпусного удара: солнечное сплетение, а не голова.
+func _aim_body(f) -> Vector3:
+    return f.torso.global_position + Vector3(0.0, 0.22, 0.0)
+
+
+## Запуск удара. body = true — удар в корпус (цель ниже), kind уже body_*.
+func _punch(att: Node3D, def: Node3D, kind: String, body: bool = false) -> bool:
+    return att.start_punch(kind, _aim_body(def) if body else _aim_at(def))
 
 
 func _match_coins() -> int:
@@ -4336,6 +4476,148 @@ func _run_lockertest() -> void:
             " · ", locker_msg, " · цвет перчаток ", look["gloves_color"],
             " · владеет ", "да" if _owns("gloves_color:neon") else "нет")
     get_tree().quit()
+
+
+## Проверка новых ударов: кросс, корпус, буфер ввода и штраф за поражение.
+func _run_punchtest() -> void:
+    no_cash = true
+    demo = false
+    var ok := true
+    var lines: Array = []
+
+    # 1. Input Map: кросс и корпусные действия, у корпусных — Ctrl
+    var cross_action: bool = InputMap.has_action("punch_cross")
+    var body_actions := 0
+    for bid in BODY_ACTIONS:
+        if InputMap.has_action(String(bid)):
+            body_actions += 1
+    var ctrl_ev := false
+    if InputMap.has_action("punch_body_jab"):
+        for ev in InputMap.action_get_events("punch_body_jab"):
+            if ev is InputEventKey and (ev as InputEventKey).ctrl_pressed:
+                ctrl_ev = true
+    ok = ok and cross_action and body_actions == BODY_ACTIONS.size() and ctrl_ev
+    lines.append("действия: кросс=%s, корпусных=%d/%d, Ctrl=%s" % [
+            cross_action, body_actions, BODY_ACTIONS.size(), ctrl_ev])
+
+    _start_fight()
+    no_ai = true
+
+    # 2. Кросс: начинается, доигрывает анимацию и наносит урон
+    _place_for_punch()
+    var p0: float = enemy.hp
+    var cross_start: bool = _try_player_punch("cross", false)
+    var cross_kind: bool = player.punch_kind == "cross"
+    _tick_until_idle()
+    var cross_hit: bool = enemy.hp < p0 - 0.01
+    ok = ok and cross_start and cross_kind and cross_hit
+    lines.append("кросс: старт=%s, вид=%s, урон=%s (hp %.0f→%.0f)" % [
+            cross_start, cross_kind, cross_hit, p0, enemy.hp])
+
+    # 2b. Ввод через _unhandled_input: кросс, Ctrl+джеб (корпус), обычный джеб
+    _place_for_punch()
+    var ev_cross := InputEventKey.new()
+    ev_cross.keycode = int(keys["punch_cross"])
+    ev_cross.pressed = true
+    _unhandled_input(ev_cross)
+    var cross_input: bool = player.punch_kind == "cross"
+    _place_for_punch()
+    var ev_body := InputEventKey.new()
+    ev_body.keycode = int(keys["punch_jab"])
+    ev_body.pressed = true
+    ev_body.ctrl_pressed = true
+    _unhandled_input(ev_body)
+    var body_input: bool = player.punch_kind == "body_jab"
+    _place_for_punch()
+    var ev_plain := InputEventKey.new()
+    ev_plain.keycode = int(keys["punch_jab"])
+    ev_plain.pressed = true
+    _unhandled_input(ev_plain)
+    var plain_input: bool = player.punch_kind == "jab"
+    ok = ok and cross_input and body_input and plain_input
+    lines.append("ввод: E→кросс=%s, Ctrl+J→корпус=%s, J→джеб=%s" % [
+            cross_input, body_input, plain_input])
+
+    # 3. Корпус: другой удар (body_jab), урон есть, в голову не считается
+    _place_for_punch()
+    var bhp: float = enemy.hp
+    var bhead: int = head_hits
+    var body_start: bool = _try_player_punch("jab", true)
+    var body_kind: bool = player.punch_kind == "body_jab"
+    _tick_until_idle()
+    var body_hit: bool = enemy.hp < bhp - 0.01
+    var body_no_head: bool = head_hits == bhead
+    ok = ok and body_start and body_kind and body_hit and body_no_head
+    lines.append("корпус: старт=%s, вид=%s, урон=%s, не_в_голову=%s" % [
+            body_start, body_kind, body_hit, body_no_head])
+
+    # 4. Буфер: нажатие под конец удара не теряется, а доигрывается
+    _place_for_punch()
+    var rhook: bool = _try_player_punch("rhook", false)
+    for i in 18:
+        _tick_fight(1.0 / 60.0)
+    _player_punch("cross")
+    var buffered: bool = punch_buf == "cross"
+    var buffered_fired := false
+    for i in 60:
+        _tick_fight(1.0 / 60.0)
+        if player.punch_kind == "cross":
+            buffered_fired = true
+            break
+    ok = ok and rhook and buffered and buffered_fired
+    lines.append("буфер: удар=%s, запомнил=%s, доиграл кросс=%s" % [
+            rhook, buffered, buffered_fired])
+
+    # 5. Штраф: ровно один раз и без ухода в минус
+    coins = 100
+    points_loss_on_defeat = 40
+    defeat_penalty_applied = false
+    defeat_penalty = 0
+    _apply_defeat_penalty()
+    var after1: int = coins
+    var pen1: int = defeat_penalty
+    _apply_defeat_penalty()
+    var repeat_coins: int = coins
+    var once_ok: bool = pen1 == 40 and after1 == 60 and coins == 60 and defeat_penalty == 40
+    coins = 10
+    defeat_penalty_applied = false
+    defeat_penalty = 0
+    _apply_defeat_penalty()
+    var floor_ok: bool = coins == 0 and defeat_penalty == 10
+    ok = ok and once_ok and floor_ok
+    lines.append("штраф: 100−40=%d, повторно=%d, с 10 монет списано %d" % [
+            after1, repeat_coins, 10])
+
+    # 6. Настройка штрафа доступна и через аргумент --penalty
+    lines.append("настройка: points_loss_on_defeat=%d" % points_loss_on_defeat)
+
+    _reset_fight()
+    _set_state(St.MENU)
+    print("PUNCHTEST ", "ок" if ok else "ОШИБКА")
+    for l in lines:
+        print("PUNCHTEST ", l)
+    get_tree().quit()
+
+
+## Поставить бойцов на дистанцию удара и обнулить состояние боя.
+func _place_for_punch() -> void:
+    player.reset(Vector3(0.0, 0.0, 0.75), 100.0)
+    enemy.reset(Vector3(0.0, 0.0, -0.35), 120.0)
+    _face_each_other()
+    player.blocking = false
+    player.stun = 0.0
+    player.punch_kind = ""
+    enemy.stun = 0.0
+    enemy.hp = enemy.max_hp
+    head_hits = 0
+
+
+## Прокрутить бой, пока игрок не закончит текущий удар.
+func _tick_until_idle() -> void:
+    for i in 120:
+        _tick_fight(1.0 / 60.0)
+        if player.punch_kind == "" and player.stun <= 0.001:
+            break
 
 
 func _take_shot() -> void:
