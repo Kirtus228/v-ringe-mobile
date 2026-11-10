@@ -8,7 +8,7 @@ static var code := "ru"
 const DICT := {
     # --- меню
     "title": ["В РИНГЕ", "IN THE RING"],
-    "version": ["РАННИЙ ДОСТУП · v28", "EARLY ACCESS · v28"],
+    "version": ["РАННИЙ ДОСТУП · v29", "EARLY ACCESS · v29"],
     "hook": ["Один раунд. 90 секунд. Вылетишь за канаты — проиграл.",
             "One round. 90 seconds. Fly through the ropes — you lose."],
     "play": ["ИГРАТЬ", "PLAY"],

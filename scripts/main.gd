@@ -374,6 +374,10 @@ var mash_grace := 0.0
 var _auto_mash_t := 0.0
 ## пауза нажата во время перерыва между раундами — вернуться надо в перерыв
 var paused_from_rest := false
+## «держим сирену»: время раунда вышло, но кто-то в нокдауне/подъёме. Раунд
+## не закрываем, пока бой не разрешится (встал/КО/таймаут поражения): иначе
+## падение в последние секунды оставляло бойца лежать уже в перерыве.
+var bell_hold := false
 
 ## Таймер подъёма: создаётся в _ready, стартует только в состоянии «downed».
 var get_up_timer: Timer
@@ -446,6 +450,8 @@ var knock_test := false
 var knock_shot := ""
 ## автотест раундов и перерывов
 var round_test := false
+## автотест «нокдаун на сирене»: v29, отсрочка конца раунда
+var bell_test := false
 
 var ai := {"state": "wait", "t": 0.8, "pending": "jab"}
 var player_move := Vector3.ZERO
@@ -609,6 +615,8 @@ func _ready() -> void:
         _run_knocktest()
     if round_test:
         _run_roundtest()
+    if bell_test:
+        _run_belltest()
     if knock_shot != "":
         _run_knockshot()
 
@@ -850,6 +858,8 @@ func _parse_args() -> void:
             rest_override = maxf(0.0, float(a.substr(7)))
         elif a == "--roundtest":
             round_test = true
+        elif a == "--belltest":
+            bell_test = true
 
 
 # ---------------------------------------------------------------- сцена
@@ -1612,6 +1622,7 @@ func _reset_fight() -> void:
     rounds_won_p = 0
     rounds_won_e = 0
     paused_from_rest = false
+    bell_hold = false
     mash_grace = 0.0
     _auto_mash_t = 0.0
     timer = ROUND_TIME
@@ -2138,15 +2149,20 @@ func _tick_fight(delta: float) -> void:
     if training:
         hud.set_training(true, form)
     elif timer <= 0.0:
-        # время вышло, пока боец лежит: подняться он уже не успел — это
-        # поражение (или победа, если лежит соперник), а не решение по очкам
-        if downed_active:
-            _end_fight("lose" if downed_who == player else "win", true)
-        elif round_num < rounds_total:
-            # раунд кончился, но бой нет — перерыв и следующий раунд
-            _end_round()
+        # Время раунда вышло. Если кто-то лежит/падает/встаёт — сирена НЕ
+        # закрывает раунд: держим (bell_hold), часы остаются на 0, бой идёт
+        # дальше, таймер подъёма и «расжим» работают как обычно. Раунд
+        # закроется, как только нокдаун разрешился (подъём) или бой кончился
+        # (КО/таймаут поражения уже вызвал _end_fight).
+        if _knock_active():
+            bell_hold = true
         else:
-            _end_by_time()
+            bell_hold = false
+            if round_num < rounds_total:
+                # раунд кончился, но бой нет — перерыв и следующий раунд
+                _end_round()
+            else:
+                _end_by_time()
 
 
 
@@ -3070,11 +3086,13 @@ func _tick_knockdown(delta: float) -> void:
 
 
 ## Одно нажатие «встать»: копит прогресс; когда набрано — начинается подъём.
+## Пауза перед остыванием 0.80 с: при темпе до ~1.25 нажатий/с прогресс не
+## тает, и обещанные get_up_presses=8 нажатий реально поднимают (v29).
 func _mash_get_up() -> void:
     var who: Node3D = downed_who
     if who == null or who != player:
         return
-    mash_grace = 0.55
+    mash_grace = 0.80
     var p: float = who.get_up_press()
     if p >= 0.999:
         _start_get_up(player)
@@ -3293,6 +3311,17 @@ func _hp_zero(def: Node3D, att: Node3D, push_dir: Vector3, anim_kind: String) ->
 func _end_fight(kind: String, by_ko: bool) -> void:
     pending = kind
     ko_visual = by_ko
+    bell_hold = false
+    # Бой закончился — нокдаун-состояние и его UI больше не нужны: иначе
+    # подсказка «ЖМИ SPACE — ВСТАТЬ», отсчёт, полоска «расжима» и приглушённый
+    # HP-бар оставались висеть на экране КО и результата, а таймер подъёма
+    # продолжал идти и мог выставить отложенное поражение.
+    if get_up_timer != null:
+        get_up_timer.stop()
+    get_up_timeout_pending = false
+    _clear_downed()
+    if hud != null:
+        hud.set_hp_dim(false)
     ko_timer = 1.8 if by_ko else 1.1
     if kind == "ringout" or kind == "ringoutlose":
         ko_timer = 2.6
@@ -3309,15 +3338,17 @@ func _end_fight(kind: String, by_ko: bool) -> void:
 
 
 func _end_by_time() -> void:
-    # решение по очкам: сначала выигранные раунды, при равенстве — здоровье
+    # решение по очкам: сначала выигранные раунды, при равенстве — здоровье.
+    # Здоровье сравниваем ДОЛЯМИ от максимума: максимумы у бойцов разные
+    # (игрок 100…140, соперник 105…199), абсолютный hp давал сопернику фору.
     var kind := "draw"
     if rounds_won_p > rounds_won_e:
         kind = "timewin"
     elif rounds_won_p < rounds_won_e:
         kind = "timelose"
-    elif player.hp > enemy.hp:
+    elif _hp_frac(player) > _hp_frac(enemy):
         kind = "timewin"
-    elif player.hp < enemy.hp:
+    elif _hp_frac(player) < _hp_frac(enemy):
         kind = "timelose"
     _end_fight(kind, false)
 
@@ -3333,9 +3364,11 @@ func _rounds_for_fight() -> int:
 
 ## Конец раунда, но не боя: считаем раунд и уходим в перерыв.
 func _end_round() -> void:
-    if player.hp > enemy.hp:
+    bell_hold = false
+    # Раунд по долям здоровья, не по абсолютному hp: максимумы разные.
+    if _hp_frac(player) > _hp_frac(enemy):
         rounds_won_p += 1
-    elif enemy.hp > player.hp:
+    elif _hp_frac(enemy) > _hp_frac(player):
         rounds_won_e += 1
     combo = 0
     comboTimer = 0.0
@@ -3365,6 +3398,7 @@ func _end_round() -> void:
 func _next_round() -> void:
     round_num += 1
     paused_from_rest = false
+    bell_hold = false
     timer = ROUND_TIME
     rest_left = 0.0
     combo = 0
@@ -3530,6 +3564,26 @@ func _distance() -> float:
     var a := player.position
     var b := enemy.position
     return Vector2(a.x - b.x, a.z - b.z).length()
+
+
+## Кто-то в нокдауне: падает, лежит или встаёт (любая стадия автомата, не только
+## «downed»). Пока это так, сирена не закрывает раунд — см. bell_hold.
+func _knock_active() -> bool:
+    if downed_active:
+        return true
+    if player != null and player.is_down():
+        return true
+    if enemy != null and enemy.is_down():
+        return true
+    return false
+
+
+## Доля здоровья 0..1: корректная база для очков раунда и тай-брейка, когда
+## максимумы hp у бойцов разные.
+func _hp_frac(f: Node3D) -> float:
+    if f == null:
+        return 0.0
+    return f.hp / maxf(f.max_hp, 0.001)
 
 
 func _face_each_other() -> void:
@@ -5347,6 +5401,75 @@ func _knock_wait_enemy(want: int, limit: float) -> float:
     return -1.0
 
 
+## Нажатие Space на реальном кадре — ровно ОДНО засчитанное нажатие. Ручной
+## `_tick_fight` здесь не вызываем: is_action_just_pressed сверяется с номером
+## кадра, и ручной вызов в том же кадре заставил бы движок засчитать нажатие
+## второй раз (так _knock_press_space удваивает нажатия — для «расжима» это не
+## важно, для замера темпа важно). Отпускаем после кадра, в котором движок сам
+## провёл бой. Если кадр нажатие проглотил (бывает на первом нажатии/границе
+## кадра) — повторяем до 3 раз, чтобы каждое посчитанное нажатие реально дошло.
+func _mash_press_real() -> bool:
+    for i in 3:
+        var before := float(player.get_up_progress)
+        Input.action_press("get_up")
+        await get_tree().process_frame
+        Input.action_release("get_up")
+        await get_tree().process_frame
+        if int(player.knock_state) != FighterScript.KnockState.DOWNED:
+            return true
+        if float(player.get_up_progress) > before + 0.0001:
+            return true
+    return false
+
+
+## Темп «расжима» на РЕАЛЬНЫХ кадрах (таймер подъёма тикает только в них):
+## нажатия раз в `interval` секунд. Возвращает, сколько нажатий понадобилось,
+## через сколько секунд начался/закончился подъём и чем всё кончилось.
+func _mash_tempo_check(interval: float) -> Dictionary:
+    get_up_time_limit = 10.0
+    on_timeout = TimeoutAction.DEFEAT
+    _start_fight()
+    no_ai = true
+    _knock_down_player()
+    _knock_wait_player(FighterScript.KnockState.DOWNED, 3.0)
+    var t0 := Time.get_ticks_msec()
+    var presses := 0
+    var t_up := -1.0
+    var next_at := 0.0
+    while Time.get_ticks_msec() - t0 < 13000:
+        if state != St.FIGHT:
+            break
+        var now := float(Time.get_ticks_msec() - t0) / 1000.0
+        if now < next_at:
+            await get_tree().process_frame
+            continue
+        await _mash_press_real()
+        presses += 1
+        var ks := int(player.knock_state)
+        if ks == FighterScript.KnockState.GETUP or ks == 0:
+            t_up = float(Time.get_ticks_msec() - t0) / 1000.0
+            break
+        next_at += interval
+    # доводим: либо полный подъём, либо поражение по таймауту (10 с)
+    var deadline := Time.get_ticks_msec() + 4000
+    while Time.get_ticks_msec() < deadline:
+        if state == St.KO:
+            break
+        if int(player.knock_state) == 0 and state == St.FIGHT:
+            break
+        await get_tree().process_frame
+    var result := "нет"
+    if state == St.KO:
+        result = "поражение"
+    elif int(player.knock_state) == 0:
+        result = "встал"
+    var total := -1.0
+    if t_up >= 0.0:
+        total = float(Time.get_ticks_msec() - t0) / 1000.0
+    return {"interval": interval, "presses": presses, "t_up": t_up,
+            "total": total, "result": result, "hp": player.hp}
+
+
 func _run_knocktest() -> void:
     no_cash = true
     demo = false
@@ -5552,6 +5675,24 @@ func _run_knocktest() -> void:
     lines.append("соперник: нокдаун=%s, сам_встал_HP=%.0f, счётчик=%d, после_лимита_КО=%s, итог=«%s»"
             % [enemy_ok, enemy_hp1, int(enemy.knockdown_count), enemy_ko, pending])
 
+    # 11. Темп «расжима» на реальных кадрах (v29, grace 0.80): при нажатии раз
+    # в 0.7 с подъём успевает за 10 с; при раз в 1.5 с прогресс тает быстрее,
+    # чем растёт, — не встаёт и получает поражение по таймауту.
+    var m07: Dictionary = await _mash_tempo_check(0.7)
+    var slow_ok: bool = String(m07["result"]) == "встал" \
+            and float(m07["t_up"]) > 0.0 and float(m07["t_up"]) < 10.0 \
+            and int(m07["presses"]) <= 10
+    ok = ok and slow_ok
+    lines.append("темп 0.7 с (%.2f нажатий/с): нажатий=%d, подъём_начался=%.2f с, встал=%.2f с, hp=%.0f, итог=«%s» (ждали встал за 10 с)"
+            % [1.0 / 0.7, int(m07["presses"]), float(m07["t_up"]),
+                float(m07["total"]), float(m07["hp"]), String(m07["result"])])
+    var m15: Dictionary = await _mash_tempo_check(1.5)
+    var slow_fail_ok: bool = String(m15["result"]) == "поражение" \
+            and int(m15["presses"]) >= 5
+    ok = ok and slow_fail_ok
+    lines.append("темп 1.5 с (%.2f нажатий/с): нажатий=%d, подъём_начался=%.2f с, итог=«%s» (ждали поражение)"
+            % [1.0 / 1.5, int(m15["presses"]), float(m15["t_up"]), String(m15["result"])])
+
     for l in lines:
         print("KNOCKTEST ", l)
     print("KNOCKTEST ок=", ok, " (get_up_time_limit=", get_up_time_limit,
@@ -5657,6 +5798,112 @@ func _run_roundtest() -> void:
     for l in lines:
         print("ROUNDTEST ", l)
     print("ROUNDTEST ок=", ok)
+    get_tree().quit()
+
+
+## v29: нокдаун на сирене не закрывает раунд (bell_hold), очки раунда/тай-брейк
+## по долям hp, _end_fight во время нокдауна снимает состояние и HUD.
+func _run_belltest() -> void:
+    no_cash = true
+    demo = false
+    training = false
+    var ok := true
+    var lines: Array = []
+
+    # (а) репро бага: игрока роняют за 0.5 с до сирены. Раунд обязан «придержать»
+    # сирену, дать встать и только потом уйти в перерыв (раньше боец застревал
+    # в DOWNED и лежал весь следующий раунд).
+    rounds_override = 3
+    get_up_time_limit = 10.0
+    on_timeout = TimeoutAction.DEFEAT
+    _start_fight()
+    no_ai = true
+    bell_hold = false
+    timer = 0.5
+    var downed_ok := _knock_down_player()
+    # догоняем бой до «лежит»: часы раунда уже на нуле
+    _knock_advance(2.2)
+    var held: bool = bell_hold and state == St.FIGHT and timer <= 0.0001 \
+            and int(player.knock_state) == FighterScript.KnockState.DOWNED \
+            and downed_active
+    lines.append("нокдаун за 0.5 с до сирены: уронили=%s, лежит=%s, сирена_придержана=%s, раунд_не_закрыт=%s, часы_раунда=%.1f, таймер_подъёма=%.1f"
+            % [downed_ok, int(player.knock_state) == FighterScript.KnockState.DOWNED,
+                bell_hold, state == St.FIGHT, timer, get_up_timer.time_left])
+    # «расжим» и таймер работают как обычно, после подъёма раунд закрывается сам
+    await _knock_mash(int(player.get_up_presses) + 4)
+    _knock_wait_player(FighterScript.KnockState.NONE, 3.0)
+    var rest_ok: bool = state == St.REST and round_num == 1 and not bell_hold \
+            and not downed_active and player.hp > 0.0
+    lines.append("после подъёма: перерыв=%s, раунд=%d, hp=%.0f, счёт_раундов=%d:%d"
+            % [state == St.REST, round_num, player.hp, rounds_won_p, rounds_won_e])
+    _next_round()
+    var control: bool = player.start_punch("jab")
+    player.punch_kind = ""
+    var next_ok: bool = state == St.FIGHT and round_num == 2 \
+            and is_equal_approx(timer, ROUND_TIME) and player.hp > 0.0 \
+            and not player.is_down() and control
+    lines.append("следующий раунд: бой=%s, раунд=%d, таймер=%.0f, hp=%.0f, управление=%s"
+            % [state == St.FIGHT, round_num, timer, player.hp, control])
+    ok = ok and downed_ok and held and rest_ok and next_ok
+
+    # (б) очки раунда по долям hp: 90/100 (0.90) лучше 110/168 (0.65),
+    # хотя абсолютный hp у соперника выше.
+    rounds_override = 3
+    _start_fight()
+    no_ai = true
+    player.hp = 90.0
+    enemy.max_hp = 168.0
+    enemy.hp = 110.0
+    rounds_won_p = 0
+    rounds_won_e = 0
+    timer = 0.05
+    _tick_fight(0.1)
+    var round_ok: bool = state == St.REST and rounds_won_p == 1 and rounds_won_e == 0
+    lines.append("очки раунда: 90/100 против 110/168 → счёт %d:%d (ждали 1:0), перерыв=%s"
+            % [rounds_won_p, rounds_won_e, state == St.REST])
+    ok = ok and round_ok
+
+    # (б2) тай-брейк по очкам в последнем раунде — тоже по долям hp
+    _start_fight()
+    no_ai = true
+    rounds_total = 3
+    round_num = 3
+    rounds_won_p = 1
+    rounds_won_e = 1
+    player.hp = 90.0
+    enemy.max_hp = 168.0
+    enemy.hp = 110.0
+    timer = 0.05
+    _tick_fight(0.1)
+    var time_ok: bool = state == St.KO and pending == "timewin"
+    lines.append("тай-брейк: 90/100 против 110/168 → итог=«%s» (ждали timewin), экран_КО=%s"
+            % [pending, state == St.KO])
+    ok = ok and time_ok
+
+    # (в) _end_fight во время нокдауна: таймер подъёма стоп, подсказка и полоска
+    # «расжима» сняты, downed-состояние очищено.
+    rounds_override = 3
+    get_up_time_limit = 10.0
+    _start_fight()
+    no_ai = true
+    _knock_down_player()
+    _knock_wait_player(FighterScript.KnockState.DOWNED, 3.0)
+    _tick_fight(1.0 / 60.0)
+    var ui_before: bool = hud.getup_lbl.visible and not get_up_timer.is_stopped()
+    _end_fight("lose", true)
+    var cleanup_ok: bool = get_up_timer.is_stopped() and not downed_active \
+            and not hud.getup_lbl.visible and not hud.getup_time_lbl.visible \
+            and not hud.mash_bg.visible and state == St.KO
+    lines.append("_end_fight в нокдауне: HUD_был=%s, таймер_стоп=%s, downed_снят=%s, подсказка_снята=%s, полоска_снята=%s"
+            % [ui_before, get_up_timer.is_stopped(), not downed_active,
+                not hud.getup_lbl.visible, not hud.mash_bg.visible])
+    ok = ok and ui_before and cleanup_ok
+
+    rounds_override = 0
+    bell_hold = false
+    for l in lines:
+        print("BELLTEST ", l)
+    print("BELLTEST ок=", ok)
     get_tree().quit()
 
 
