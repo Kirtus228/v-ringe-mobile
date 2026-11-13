@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="StatsConfig" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/configs/stats_config.gd" id="1_stats"]
+
+[resource]
+script = ExtResource("1_stats")
+strength_to_damage = 0.6
+stamina_to_hp = 0.35
+speed_to_move = 0.25
+max_stat = 100.0
+default_stats = {
+"stamina": 10.0,
+"speed": 10.0,
+"strength": 10.0
+}

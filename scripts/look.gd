@@ -12,6 +12,13 @@ const CATALOG := [
         {"id": "mohawk", "name": "ирокез", "price": 260, "hair": "mohawk"},
         {"id": "tail", "name": "хвост", "price": 220, "hair": "tail"},
         {"id": "afro", "name": "афро", "price": 300, "hair": "afro"},
+        {"id": "pompadour", "name": "помпадур", "price": 340, "hair": "pompadour"},
+        {"id": "undercut", "name": "андеркат", "price": 300, "hair": "undercut"},
+        {"id": "bun", "name": "пучок", "price": 280, "hair": "bun"},
+        {"id": "dreads", "name": "дреды", "price": 360, "hair": "dreads"},
+        {"id": "long", "name": "длинные", "price": 320, "hair": "long"},
+        {"id": "curls", "name": "кудри", "price": 300, "hair": "curls"},
+        {"id": "flat", "name": "площадка", "price": 260, "hair": "flat"},
     ]},
     {"id": "hair_color", "name": "ЦВЕТ ВОЛОС", "items": [
         {"id": "black", "name": "чёрный", "price": 0, "col": Color(0.09, 0.08, 0.07)},
@@ -82,6 +89,11 @@ const CATALOG := [
         {"id": "hi", "name": "высокие", "price": 0, "style": "hi"},
         {"id": "low", "name": "низкие", "price": 160, "style": "low"},
         {"id": "bare", "name": "босиком с тейпом", "price": 240, "style": "bare"},
+        {"id": "mid", "name": "полувысокие", "price": 200, "style": "mid"},
+        {"id": "pro", "name": "профи (липучки)", "price": 320, "style": "pro"},
+        {"id": "classic", "name": "классические", "price": 360, "style": "classic"},
+        {"id": "speed", "name": "скоростные", "price": 300, "style": "speed"},
+        {"id": "wrestle", "name": "борцовки", "price": 340, "style": "wrestle"},
     ]},
     {"id": "boots_color", "name": "ЦВЕТ БОТИНОК", "items": [
         {"id": "black", "name": "чёрные", "price": 0, "col": Color(0.06, 0.07, 0.10)},
@@ -186,3 +198,103 @@ static func outfit(look: Dictionary) -> Dictionary:
     if gc.has("glow"):
         o["glove_glow"] = gc["glow"]
     return o
+
+
+# ---------------------------------------------------------------- v71k: разнообразие
+## v71k: детерминированно собрать РАЗНООБРАЗНЫЙ look бойца по номеру n из всех
+## существующих id каталога CATALOG. Один и тот же n всегда даёт один и тот же вид.
+## base (если задан) накладывается сверху — явно заданные ключи главнее, поэтому
+## в карьере цвета стиля соперника сохраняются, а варьируются только недостающие.
+##
+## Свойства (проверяются variation_test):
+##  - причёска: шаг 5 по 12 вариантам (5 взаимно просто с 12) → все 12 встречаются,
+##    и в любых 12 подряд n нет повторов;
+##  - кожа: шаг 5 по 6 → соседние n всегда разной кожи;
+##  - фигура: шаг 2 по 3 → соседние n всегда разной фигуры, все 3 сбалансированы;
+##  - цвета/перчатки/шорты/ботинки идут своими шагами (взаимно простыми с числом
+##    вариантов), поэтому разнообразие не «залипает» на одном id.
+static func varied_look(n: int, base: Dictionary = {}) -> Dictionary:
+    var i := absi(n)
+    var d := {
+        "hair": String(items("hair")[posmod(i * 5 + 3, item_count("hair"))]["id"]),
+        "hair_color": String(items("hair_color")[posmod(i * 3 + 2,
+                item_count("hair_color"))]["id"]),
+        "skin": String(items("skin")[posmod(i * 5 + 2, item_count("skin"))]["id"]),
+        "build": String(items("build")[posmod(i * 2 + 1, item_count("build"))]["id"]),
+        "gloves": String(items("gloves")[posmod(i + 1, item_count("gloves"))]["id"]),
+        "gloves_color": String(items("gloves_color")[posmod(i * 3 + 1,
+                item_count("gloves_color"))]["id"]),
+        "shorts": String(items("shorts")[posmod(i * 1, item_count("shorts"))]["id"]),
+        "shorts_color": String(items("shorts_color")[posmod(i * 5 + 2,
+                item_count("shorts_color"))]["id"]),
+        "boots": String(items("boots")[posmod(i * 5 + 4, item_count("boots"))]["id"]),
+        "boots_color": String(items("boots_color")[posmod(i * 2 + 1,
+                item_count("boots_color"))]["id"]),
+    }
+    # base главнее: если там валидный id — берём его, иначе оставляем наш вариант
+    for k in base.keys():
+        var cid := String(k)
+        if not d.has(cid):
+            continue
+        var wanted := String(base[k])
+        if item_index(cid, wanted) != 0 or wanted == String(items(cid)[0]["id"]):
+            d[cid] = wanted
+        else:
+            # невалидный id в base — не подставляем «первый» случайно, оставляем varied
+            d[cid] = String(d[cid])
+    return d
+
+
+## v71k: проверка разнообразия на наборе n. Возвращает статистику для stdout/теста.
+## Проверяет: все причёски покрыты, в любых 12 подряд нет повторов причёски,
+## все фигуры встречаются, соседние n отличаются причёской/кожей/фигурой,
+## все id валидны.
+static func variation_test(ns: Array) -> Dictionary:
+    var hairs: Array = []
+    var builds: Array = []
+    var invalid := 0
+    var adjacent_ok := 0
+    var prev: Dictionary = {}
+    for n in ns:
+        var l := varied_look(int(n))
+        # валидность всех id
+        for cat in CATALOG:
+            var cid := String(cat["id"])
+            var found := false
+            for it in cat["items"]:
+                if String(it["id"]) == String(l.get(cid, "")):
+                    found = true
+                    break
+            if not found:
+                invalid += 1
+        var h := String(l["hair"])
+        var b := String(l["build"])
+        var s := String(l["skin"])
+        hairs.append(h)
+        builds.append(b)
+        if not prev.is_empty():
+            if String(prev["hair"]) != h and String(prev["skin"]) != s \
+                    and String(prev["build"]) != b:
+                adjacent_ok += 1
+        prev = l
+    # покрытие причёсок
+    var uniq_hair := {}
+    for h in hairs:
+        uniq_hair[h] = true
+    # повторы причёски внутри любых 12 подряд
+    var window_repeats := 0
+    for start in range(0, maxi(0, hairs.size() - 11)):
+        var seen := {}
+        for i in range(start, mini(start + 12, hairs.size())):
+            var h2 := String(hairs[i])
+            if seen.has(h2):
+                window_repeats += 1
+            seen[h2] = true
+    var uniq_build := {}
+    for b2 in builds:
+        uniq_build[b2] = true
+    return {"n": ns.size(), "hairs": uniq_hair.size(), "hair_unique": uniq_hair.keys(),
+            "builds": uniq_build.size(), "build_unique": uniq_build.keys(),
+            "repeats_in_12": window_repeats, "invalid_ids": invalid,
+            "adjacent_different": adjacent_ok, "pairs": maxi(0, ns.size() - 1)}
+

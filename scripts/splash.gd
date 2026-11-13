@@ -1,4 +1,4 @@
-﻿extends Node
+extends Node
 ## Заставка (v15): кадр боя двух боксёров.
 ##
 ## Отдельная сцена собирается в SubViewport, рендерится один раз и отдаётся
@@ -30,6 +30,10 @@ var cam: Camera3D
 var atk: Node3D
 var dfn: Node3D
 var contact := Vector3.ZERO
+## Этап 2 визуала: VisualConfig из main. null/визуал OFF — кадр как до правок.
+var visual = null
+## --seed=N: не перемешивать глобальный RNG в конце (кадры детерминированы).
+var p_deterministic := false
 
 
 # ------------------------------------------------------------------ мелочи
@@ -236,6 +240,19 @@ func _lights() -> void:
     view.add_child(flash)
     flash.position = Vector3(0.2, 1.95, 1.5)
 
+    # Этап 2 визуала: аккуратный fill/rim в том же стиле (только при visual_level>OFF).
+    # При OFF ничего не добавляется — кадр заставки байт-в-байт как в baseline.
+    if visual != null and visual.visual_on():
+        var k := float(visual.splash_light_mult)
+        var fill := float(visual.fighter_fill()) * k
+        if fill > 0.0:
+            _spot(Vector3(0.0, 3.8, 3.4), Vector3(0.0, 1.55, 0.0),
+                    visual.fighter_fill_color, fill, 62.0, 15.0)
+        var rim := float(visual.fighter_rim()) * k
+        if rim > 0.0:
+            _spot(Vector3(0.7, 3.0, -3.2), Vector3(0.0, 1.62, 0.0),
+                    visual.fighter_rim_color, rim, 42.0, 13.0)
+
 
 # ------------------------------------------------------------------ бойцы
 
@@ -248,12 +265,14 @@ func _pose_fighters() -> void:
     atk = FighterScript.new()
     atk.name = "Atk"
     view.add_child(atk)
+    atk.use_skin_models = visual != null and visual.use_skins()
     atk.setup(true, LOOK_ATK)
     atk.position = Vector3(-0.66, 0.0, 0.02)
 
     dfn = FighterScript.new()
     dfn.name = "Def"
     view.add_child(dfn)
+    dfn.use_skin_models = visual != null and visual.use_skins()
     dfn.setup(true, LOOK_DEF)
     dfn.position = Vector3(0.60, 0.0, -0.02)
 
@@ -312,7 +331,9 @@ func _pose_fighters() -> void:
     _sweat(dfn.head.global_position, 28)
     _sweat(atk.head.global_position, 7)
     _impact()
-    randomize()
+    # без --seed перемешиваем RNG дальше (как раньше), с --seed — оставляем детерминизм
+    if not p_deterministic:
+        randomize()
 func _face(f: Node3D, p: Vector3) -> void:
     f.look_at(Vector3(p.x, f.position.y, p.z), Vector3.UP)
 

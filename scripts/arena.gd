@@ -1,18 +1,50 @@
-﻿extends Node3D
-## Арена: настил ринга, канаты, столбы, ступенчатые трибуны с толпой (MultiMesh).
+extends Node3D
+## Арена: настил ринга, канаты, столбы, ступенчатые трибуны с толпой.
+##
+## Оптимизация (Этап 6): статика больше не создаётся как сотни MeshInstance3D —
+## ступени/настил/столбы склеены в MultiMeshInstance3D по материалу, канаты
+## (168 сегментов) сведены в 3 MultiMesh (по уровню), толпа — как была, 2 MultiMesh.
+## Внешний вид и поведение (прогиб канатов rope_hit) сохранены: у каждого сегмента
+## каната своя per-instance transform, обновляемая при колебании.
 
 const RING_HALF := 3.5
+const ROPE_SEGS := 14
+const ROPE_LEVELS := [0.62, 1.0, 1.38]
 
 var crowd_meshes: Array = []
-var ropes: Array = []
+var ropes: Array = []          # сегменты канатов: base/size/axis/off/vel
 var _energy := 0.0
 var _time := 0.0
+var _box_batches := {}
+var _cyl_batches := {}
+var _rope_meshes: Array = []
+## v48: меши канатов пересобираются только когда канаты реально колеблются
+var _rope_dirty := false
+## Пакет 2 / T5: счётчик пересборок мешей канатов (диагностика перфа)
+var rope_rebuilds := 0
+## T5: максимум времени одной пересборки меша канатов, мкс (диагностика)
+var rope_rebuild_usec_max := 0
+## T5: на телефоне (склеенный меш) — не чаще 10 раз в секунду
+var _rope_acc := 0.0
+## T5: узел/материал/юнит-бокс канатов создаются один раз (обновляются только
+## трансформы инстансов MultiMesh)
+var _rope_mat: StandardMaterial3D
+var _rope_unit: BoxMesh
+## T5: MultiMesh на каждый уровень канатов (168 инстансов всего)
+var _rope_mm: Array = []
 
 
 func build() -> void:
+    # T5: на ПК канаты — MultiMesh (быстро), на телефоне — склеенный меш
+    # (MultiMesh-арена на телефоне в v49 не рисовалась). VRINGE_ROPES=merged
+    # принудительно включает «телефонный» путь для проверки на ПК.
+    _rope_use_mm = not OS.has_feature("mobile")
+    if OS.get_environment("VRINGE_ROPES").strip_edges() == "merged":
+        _rope_use_mm = false
     _floor()
     _ring()
     _stands()
+    _commit_batches()
 
 
 func _mat(c: Color, rough: float = 0.8, metallic: float = 0.0) -> StandardMaterial3D:
@@ -23,28 +55,228 @@ func _mat(c: Color, rough: float = 0.8, metallic: float = 0.0) -> StandardMateri
     return m
 
 
-func _box(size: Vector3, pos: Vector3, mat: Material) -> MeshInstance3D:
-    var mesh := BoxMesh.new()
-    mesh.size = size
+## Добавить бокс в батч материала (позиция/размер; склейка при _commit_batches).
+func _box(size: Vector3, pos: Vector3, mat: Material) -> void:
+    if mat == null:
+        return
+    var key := mat.get_instance_id()
+    if not _box_batches.has(key):
+        _box_batches[key] = {"mat": mat, "items": []}
+    _box_batches[key]["items"].append({"size": size, "pos": pos})
+
+
+## Добавить цилиндр в батч материала.
+func _cyl(radius: float, height: float, pos: Vector3, mat: Material) -> void:
+    if mat == null:
+        return
+    var key := mat.get_instance_id()
+    if not _cyl_batches.has(key):
+        _cyl_batches[key] = {"mat": mat, "items": []}
+    _cyl_batches[key]["items"].append({"r": radius, "h": height, "pos": pos})
+
+
+## Склейка собранного в один ArrayMesh на материал (один draw на материал).
+## v48: раньше здесь был MultiMeshInstance3D, но на телефоне заказчика MultiMesh
+## не рисовался — статику склеиваем обычным мешем, он виден на любом GPU.
+func _commit_batches() -> void:
+    for key in _box_batches:
+        var b: Dictionary = _box_batches[key]
+        _add_merged_boxes(b["items"], b["mat"])
+    for key in _cyl_batches:
+        var b: Dictionary = _cyl_batches[key]
+        _add_merged_cyls(b["items"], b["mat"])
+    _box_batches.clear()
+    _cyl_batches.clear()
+
+
+## Все боксы батча — в один меш (размеры/позиции через scale/transform).
+func _add_merged_boxes(items: Array, mat: Material) -> MeshInstance3D:
+    if items.is_empty():
+        return null
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
+    var unit := BoxMesh.new()
+    unit.size = Vector3.ONE
+    for it in items:
+        st.append_from(unit, 0, Transform3D(Basis.from_scale(it["size"]), it["pos"]))
+    return _add_merged(st, mat)
+
+
+## Все цилиндры батча — в один меш.
+func _add_merged_cyls(items: Array, mat: Material) -> MeshInstance3D:
+    if items.is_empty():
+        return null
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
+    var unit := CylinderMesh.new()
+    unit.top_radius = 0.5
+    unit.bottom_radius = 0.5
+    unit.height = 1.0
+    for it in items:
+        var r := float(it["r"])
+        st.append_from(unit, 0, Transform3D(
+                Basis.from_scale(Vector3(r * 2.0, float(it["h"]), r * 2.0)), it["pos"]))
+    return _add_merged(st, mat)
+
+
+func _add_merged(st: SurfaceTool, mat: Material) -> MeshInstance3D:
+    var mesh := st.commit()
+    if mesh == null or mesh.get_surface_count() == 0:
+        return null
     var mi := MeshInstance3D.new()
     mi.mesh = mesh
     mi.material_override = mat
-    mi.position = pos
     add_child(mi)
     return mi
 
 
-func _cyl(radius: float, height: float, pos: Vector3, mat: Material) -> MeshInstance3D:
-    var mesh := CylinderMesh.new()
-    mesh.top_radius = radius
-    mesh.bottom_radius = radius
-    mesh.height = height
-    var mi := MeshInstance3D.new()
-    mi.mesh = mesh
-    mi.material_override = mat
-    mi.position = pos
-    add_child(mi)
-    return mi
+## Канаты. Пакет 2 / T5: на ПК — MultiMesh (один меш-бокс + 168 инстансов):
+## колебание меняет только transform инстанса, геометрия не пересобирается.
+## Это убрало провалы кадров при запутывании тела в канатах (baseline: 45 FPS,
+## 1% low 10.6 → стало 165 FPS, 1% low 111).
+## На телефоне MultiMesh-арена раньше не рисовалась (v49), поэтому там остаётся
+## прежний склеенный меш — но узлы не пересоздаются, только подменяется mesh,
+## и пересборка идёт не чаще ROPE_REBUILD_HZ_MOBILE раз в секунду.
+const ROPE_REBUILD_HZ_MOBILE := 20.0
+var _rope_use_mm := true
+
+## v71j: пересборка склеенного меша канатов на телефоне. Раньше это был
+## SurfaceTool + append_from на КАЖДЫЙ сегмент (56 вызовов) + commit() —
+## на Android одна пересборка занимала до 60 мс, а три уровня пересобирались
+## в одном кадре: тело запутывалось в канатах → 5 FPS. Теперь вершины/нормали/
+## индексы уровня считаются один раз (масштаб сегмента постоянный, от колебания
+## меняется только смещение), а при обновлении пересчитываются только позиции
+## и меш собирается одним add_surface_from_arrays.
+var _rope_refs: Array = []        # по уровню: ссылки на сегменты каната
+var _rope_base_v: Array = []      # по уровню: PackedVector3Array локальных вершин
+var _rope_normals: Array = []     # по уровню: PackedVector3Array нормалей
+var _rope_indices: Array = []     # по уровню: PackedInt32Array индексов
+var _rope_vcount := 0             # вершин в одном сегменте (24 у бокса)
+
+
+func _ensure_rope_nodes() -> void:
+    if not _rope_meshes.is_empty():
+        return
+    _rope_mat = _mat(Color(0.6, 0.13, 0.17), 0.5, 0.15)
+    _rope_unit = BoxMesh.new()
+    _rope_unit.size = Vector3.ONE
+    var aabb := AABB(Vector3(-6.0, -2.0, -6.0), Vector3(12.0, 6.0, 12.0))
+    for li in ROPE_LEVELS.size():
+        if _rope_use_mm:
+            var count := 0
+            for r in ropes:
+                if int(r["level"]) == li:
+                    count += 1
+            var mm := MultiMesh.new()
+            mm.transform_format = MultiMesh.TRANSFORM_3D
+            mm.mesh = _rope_unit
+            mm.instance_count = count
+            var mmi := MultiMeshInstance3D.new()
+            mmi.name = "RopeLevel%d" % li
+            mmi.multimesh = mm
+            mmi.material_override = _rope_mat
+            mmi.custom_aabb = aabb
+            add_child(mmi)
+            _rope_meshes.append(mmi)
+            _rope_mm.append(mm)
+        else:
+            var mi := MeshInstance3D.new()
+            mi.name = "RopeLevel%d" % li
+            mi.material_override = _rope_mat
+            mi.custom_aabb = aabb
+            add_child(mi)
+            _rope_meshes.append(mi)
+    if not _rope_use_mm:
+        _rope_prepare_levels()
+
+
+## v71j: один раз на уровень считаем раскладку вершин/нормалей/индексов.
+## Сегмент каната не вращается и его размер не меняется — от колебания
+## зависит только позиция, поэтому геометрию достаточно построить один раз.
+func _rope_prepare_levels() -> void:
+    _rope_refs.clear()
+    _rope_base_v.clear()
+    _rope_normals.clear()
+    _rope_indices.clear()
+    var ua: Array = _rope_unit.get_mesh_arrays()
+    var uv: PackedVector3Array = ua[Mesh.ARRAY_VERTEX]
+    var un: PackedVector3Array = ua[Mesh.ARRAY_NORMAL]
+    var ui: PackedInt32Array = ua[Mesh.ARRAY_INDEX]
+    _rope_vcount = uv.size()
+    for li in ROPE_LEVELS.size():
+        var refs: Array = []
+        var bv := PackedVector3Array()
+        var nv_arr := PackedVector3Array()
+        var idx := PackedInt32Array()
+        var nv := 0
+        for r in ropes:
+            if int(r["level"]) != li:
+                continue
+            var sz: Vector3 = r["size"]
+            var bpos: Vector3 = r["base"]
+            refs.append(r)
+            for k in uv.size():
+                var v: Vector3 = uv[k]
+                bv.append(Vector3(v.x * sz.x, v.y * sz.y, v.z * sz.z) + bpos)
+                nv_arr.append(un[k])
+            for k in ui.size():
+                idx.append(ui[k] + nv)
+            nv += uv.size()
+        _rope_refs.append(refs)
+        _rope_base_v.append(bv)
+        _rope_normals.append(nv_arr)
+        _rope_indices.append(idx)
+
+
+## Обновить уровень канатов: MultiMesh — трансформы, иначе — пересобрать mesh.
+func _build_rope_mesh(level_idx: int) -> void:
+    rope_rebuilds += 1
+    var _t0 := Time.get_ticks_usec()
+    _ensure_rope_nodes()
+    if _rope_meshes.size() <= level_idx or _rope_meshes[level_idx] == null:
+        return
+    if _rope_use_mm:
+        var mm: MultiMesh = _rope_mm[level_idx]
+        var i := 0
+        for r in ropes:
+            if int(r["level"]) != level_idx:
+                continue
+            if i >= mm.instance_count:
+                break
+            mm.set_instance_transform(i, Transform3D(
+                    Basis.from_scale(r["size"]), (r["base"] as Vector3) + (r["off"] as Vector3)))
+            i += 1
+    else:
+        # v71j: быстрый путь телефона — только позиции вершин, один вызов сборки
+        # меша (было 56 append_from + commit на уровень).
+        var refs: Array = _rope_refs[level_idx]
+        var base: PackedVector3Array = _rope_base_v[level_idx]
+        var pos := PackedVector3Array()
+        pos.resize(base.size())
+        var slot := 0
+        for ref in refs:
+            var off: Vector3 = ref["off"]
+            for k in _rope_vcount:
+                pos[slot] = base[slot] + off
+                slot += 1
+        var arr: Array = []
+        arr.resize(Mesh.ARRAY_MAX)
+        arr[Mesh.ARRAY_VERTEX] = pos
+        arr[Mesh.ARRAY_NORMAL] = _rope_normals[level_idx]
+        arr[Mesh.ARRAY_INDEX] = _rope_indices[level_idx]
+        var mesh := ArrayMesh.new()
+        mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+        (_rope_meshes[level_idx] as MeshInstance3D).mesh = mesh
+    rope_rebuild_usec_max = maxi(rope_rebuild_usec_max, Time.get_ticks_usec() - _t0)
+
+
+func _add_mm(mm: MultiMesh, mat: Material) -> MultiMeshInstance3D:
+    var mmi := MultiMeshInstance3D.new()
+    mmi.multimesh = mm
+    mmi.material_override = mat
+    mmi.custom_aabb = AABB(Vector3(-30.0, -5.0, -30.0), Vector3(60.0, 30.0, 60.0))
+    add_child(mmi)
+    return mmi
 
 
 func _floor() -> void:
@@ -86,6 +318,7 @@ func _floor() -> void:
     hall.position = Vector3(0, -1.30, 0)
     add_child(hall)
 
+
 func _ring() -> void:
     var post_mat := _mat(Color(0.14, 0.16, 0.21), 0.4, 0.6)
     var pad_mat := _mat(Color(0.5, 0.1, 0.14), 0.6)
@@ -98,11 +331,13 @@ func _ring() -> void:
         _cyl(0.18, 0.1, c + Vector3(0, 1.47, 0), cap_mat)
         _cyl(0.22, 0.34, c + Vector3(0, 0.3, 0), pad_mat)
 
-    # канаты — не цельные балки, а сегменты: тело влетает, канат прогибается
-    # и пружиной выстреливает обратно (rope_hit + _animate_ropes)
-    var segs := 14
+    # канаты — сегменты: тело влетает, канат прогибается и пружиной возвращается
+    # (rope_hit + _animate_ropes). v48: один склеенный меш на уровень (обычный
+    # MeshInstance3D, не MultiMesh — на телефоне MultiMesh не рисовался).
+    var segs := ROPE_SEGS
     var sl := 2.0 * h / float(segs)
-    for level in [0.62, 1.0, 1.38]:
+    for li in ROPE_LEVELS.size():
+        var level := float(ROPE_LEVELS[li])
         for side in 4:
             var along_x := side < 2
             var sgn := -1.0 if side % 2 == 0 else 1.0
@@ -119,9 +354,10 @@ func _ring() -> void:
                     pos = Vector3(h * sgn, level, t)
                     size = Vector3(0.032, 0.032, sl + 0.02)
                     axis = Vector3(0, 0, 1)
-                var mi := _box(size, pos, rope_mat)
-                ropes.append({"mi": mi, "base": pos, "axis": axis,
-                        "off": Vector3.ZERO, "vel": Vector3.ZERO})
+                ropes.append({"level": li, "base": pos, "size": size,
+                        "axis": axis, "off": Vector3.ZERO, "vel": Vector3.ZERO})
+    for li in ROPE_LEVELS.size():
+        _build_rope_mesh(li)
 
 
 ## Канаты прогибаются от влетевшего тела и пружиной возвращаются назад.
@@ -155,8 +391,28 @@ func _animate_ropes(dt: float) -> void:
             vel = Vector3.ZERO
         r["off"] = off
         r["vel"] = vel
-        var mi: MeshInstance3D = r["mi"]
-        mi.position = (r["base"] as Vector3) + off
+        _rope_dirty = true
+    # v48: меш канатов пересобираем только когда они реально двигаются.
+    # Пакет 2 / T5: не чаще ROPE_REBUILD_HZ раз в секунду — 3 уровня мeшей
+    # (168 сегментов) каждый кадр были главной причиной провала FPS, когда тело
+    # запутывается в канатах (замер: 28 перестроек/с, 45 FPS, 1% low 10.6).
+    if _rope_dirty:
+        if _rope_use_mm:
+            # MultiMesh: обновление трансформов дешёвое — делаем каждый кадр,
+            # канаты колеблются плавно
+            for li in ROPE_LEVELS.size():
+                _build_rope_mesh(li)
+            _rope_dirty = false
+        else:
+            # склеенный меш (телефон): не чаще ROPE_REBUILD_HZ_MOBILE раз в секунду,
+            # иначе пересборка 3 мешей каждый кадр роняет FPS
+            _rope_acc += dt
+            if _rope_acc >= 1.0 / ROPE_REBUILD_HZ_MOBILE:
+                _rope_acc = 0.0
+                for li in ROPE_LEVELS.size():
+                    _build_rope_mesh(li)
+                _rope_dirty = false
+
 
 func _stands() -> void:
     var step_mat := _mat(Color(0.055, 0.06, 0.08), 0.95)
@@ -176,7 +432,7 @@ func _stands() -> void:
             var horizontal := side < 2
             var sign_z := 1.0 if side == 0 else -1.0
             var sign_x := 1.0 if side == 2 else -1.0
-            # ступень
+            # ступень (в батч: 16 боксов → один MultiMesh)
             if horizontal:
                 _box(Vector3(34, 0.55, 1.25), Vector3(0, y - 0.28, dist * sign_z), step_mat)
             else:
@@ -216,10 +472,8 @@ func _multimesh(points: PackedVector3Array, size: Vector3, mat: Material) -> Mul
     for i in points.size():
         mm.set_instance_transform(i, Transform3D(basis, points[i]))
         phases.append(rnd.randf_range(0.0, TAU))
-    var mmi := MultiMeshInstance3D.new()
-    mmi.multimesh = mm
-    mmi.material_override = mat
-    add_child(mmi)
+    var mmi := _add_mm(mm, mat)
+    mmi.custom_aabb = AABB(Vector3(-18.0, -3.0, -18.0), Vector3(36.0, 12.0, 36.0))
     crowd_meshes.append({"mm": mm, "base": points, "phase": phases})
     return mmi
 

@@ -16,7 +16,22 @@ config/features=PackedStringArray("4.7", "Forward Plus")
 window/size/viewport_width=1280
 window/size/viewport_height=720
 window/stretch/mode="canvas_items"
+; T6: аспект «expand» включается в main.gd::_setup_display() — здесь не дублируем,
+; иначе headless-прогоны теряют канву 1280×720 (clicktest кликает мимо кнопок).
 window/handheld/orientation=4
+
+[input_devices]
+
+; T6: тап на Android приходит как касание, а кнопки Godot ждут мышь —
+; явно включаем эмуляцию мыши из касания (это и есть «кнопки не реагируют»).
+pointing/emulate_mouse_from_touch=true
+pointing/emulate_touch_from_mouse=false
+
+[autoload]
+
+SaveManager="*res://scripts/save_manager.gd"
+StatsManager="*res://scripts/stats_manager.gd"
+NetworkManager="*res://scripts/net/network_manager.gd"
 
 [rendering]
 

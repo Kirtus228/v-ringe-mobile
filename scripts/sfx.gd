@@ -1,4 +1,4 @@
-﻿extends Node
+extends Node
 ## Процедурные звуки: несколько AudioStreamPlayer в пуле + боевая музыка лупом.
 
 var streams := {}
@@ -123,3 +123,91 @@ func music_pause(paused: bool) -> void:
 func music_stop() -> void:
     if music:
         music.stop()
+
+
+# ------------------------------------------------------------ победа (T10)
+
+## Победная музыка: короткая процедурная фанфара (без файлов), плюс громче
+## обычной боевой темы. Сгенерированная PCM кэшируется между вызовами.
+var victory: AudioStreamPlayer
+var _fanfare: AudioStreamWAV = null
+var _cheer_t := 0.0
+
+
+func build_victory() -> void:
+    if victory == null:
+        victory = AudioStreamPlayer.new()
+        victory.bus = "Music"
+        victory.volume_db = -8.0
+        add_child(victory)
+
+
+## Фанфара: три восходящих ноты + аккорд, 1.6 с, 22.05 кГц, 16 бит моно.
+func _make_fanfare() -> AudioStreamWAV:
+    var rate := 22050
+    var notes := [[523.25, 0.18], [659.25, 0.18], [783.99, 0.22], [1046.5, 0.65]]
+    var total := 0.0
+    for n in notes:
+        total += float(n[1])
+    var count := int(rate * total)
+    var buf := PackedByteArray()
+    buf.resize(count * 2)
+    var idx := 0
+    var t_off := 0.0
+    for n in notes:
+        var f := float(n[0])
+        var dur := float(n[1])
+        var samples := int(rate * dur)
+        for i in samples:
+            var t := float(i) / float(rate)
+            var env := minf(1.0, t * 60.0) * exp(-t * (3.2 if f < 1000.0 else 1.6))
+            var v := sin(TAU * f * t) * 0.34
+            v += sin(TAU * f * 2.0 * t) * 0.10
+            v += sin(TAU * f * 0.5 * t) * 0.06
+            var s := int(clampf(v * env, -1.0, 1.0) * 32000.0)
+            buf[idx] = s & 0xFF
+            buf[idx + 1] = (s >> 8) & 0xFF
+            idx += 2
+        t_off += dur
+    var wav := AudioStreamWAV.new()
+    wav.format = AudioStreamWAV.FORMAT_16_BITS
+    wav.mix_rate = rate
+    wav.stereo = false
+    wav.data = buf
+    return wav
+
+
+## Начать победную церемонию: фанфара, приглушение боевой темы и гул трибун.
+func play_victory() -> void:
+    build_victory()
+    if _fanfare == null:
+        _fanfare = _make_fanfare()
+    if music != null:
+        music_volume(-24.0)
+    victory.stream = _fanfare
+    victory.volume_db = -7.0
+    victory.play()
+    _cheer_t = 0.0
+    crowd_swell()
+
+
+## Гул трибун: несколько «cheer» подряд с нарастанием, не в один кадр.
+func crowd_swell() -> void:
+    if _cheer_t > 0.0:
+        return
+    _cheer_t = 1.8
+    _cheer_step(0)
+
+
+func _cheer_step(i: int) -> void:
+    if i > 3:
+        return
+    play("cheer", 0.92 + 0.05 * float(i), -9.0 + 2.0 * float(i))
+    if i < 3:
+        await get_tree().create_timer(0.35).timeout
+        _cheer_step(i + 1)
+
+
+func tick(delta: float) -> void:
+    if _cheer_t > 0.0:
+        _cheer_t = maxf(0.0, _cheer_t - delta)
