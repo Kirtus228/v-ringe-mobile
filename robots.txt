@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://kirtus228.github.io/v-ringe-mobile/sitemap.xml

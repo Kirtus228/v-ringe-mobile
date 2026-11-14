@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 	<head>
 		<meta charset="utf-8">
 		<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0">
-		<title>В РИНГЕ</title>
+		<title>В РИНГЕ — 3D-бокс в браузере: играть онлайн</title>
 		<style>
 html, body, #canvas {
 	margin: 0;
@@ -89,10 +89,31 @@ body {
 	text-align: center;
 	z-index: 1;
 }
+		/* seo:css */
+#status .seo-intro { max-width: 720px; padding: 0 1.5rem; text-align: center; }
+#status .seo-intro h1 { color: #fff; font: 600 1.5rem/1.3 system-ui, sans-serif; margin: 0 0 .6rem; }
+#status .seo-intro p { color: #c9c9c9; font: 400 .95rem/1.5 system-ui, sans-serif; margin: 0 0 .4rem; }
+#status-splash, #status-splash.fullsize--true { position: static; height: auto; width: auto; max-height: 30vh; max-width: 70%; object-fit: contain; margin: .8rem auto 0; }
+/* seo:css */
 		</style>
 		<link id="-gd-engine-icon" rel="icon" type="image/png" href="index.icon.png" />
 <link rel="apple-touch-icon" href="index.apple-touch-icon.png"/>
 
+	<!-- seo:head -->
+<meta name="description" content="Аркадный бокс в браузере: раунд 90 секунд, вылет за канаты, карьера, тренировки и турниры. Играй с клавиатуры или телефона без установки.">
+<meta name="robots" content="index,follow">
+<link rel="canonical" href="https://kirtus228.github.io/v-ringe-mobile/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="В РИНГЕ — 3D-бокс в браузере: играть онлайн">
+<meta property="og:description" content="Аркадный бокс в браузере: раунд 90 секунд, вылет за канаты, карьера, тренировки и турниры. Играй с клавиатуры или телефона без установки.">
+<meta property="og:image" content="https://kirtus228.github.io/v-ringe-mobile/index.png">
+<meta property="og:url" content="https://kirtus228.github.io/v-ringe-mobile/">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#0b0b0b">
+<link rel="preload" href="index.pck" as="fetch" crossorigin>
+<link rel="preload" href="index.wasm" as="fetch" crossorigin>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"VideoGame","name":"В РИНГЕ","description":"Аркадный бокс в браузере: раунд 90 секунд, вылет за канаты, карьера, тренировки и турниры. Играй с клавиатуры или телефона без установки.","url":"https://kirtus228.github.io/v-ringe-mobile/","image":"https://kirtus228.github.io/v-ringe-mobile/index.png","genre":"Boxing","gamePlatform":"Web browser","operatingSystem":"Any","applicationCategory":"Game","inLanguage":"ru","offers":{"@type":"Offer","price":"0","priceCurrency":"RUB"}}</script>
+<!-- seo:head -->
 	</head>
 	<body>
 		<canvas id="canvas">
@@ -104,6 +125,13 @@ body {
 		</noscript>
 
 		<div id="status">
+<!-- seo:body -->
+<div class="seo-intro">
+  <h1>В РИНГЕ — 3D-бокс в браузере</h1>
+  <p>Аркадный бокс: раунд 90 секунд, вылет за канаты, карьера, тренер, сюжет и турниры. Играть можно онлайн без установки.</p>
+  <p>Управление: на компьютере — клавиатура, на телефоне — сенсорные кнопки (удар, блок, уклон, захват).</p>
+</div>
+<!-- seo:body -->
 			<img id="status-splash" class="show-image--true fullsize--true use-filter--true" src="index.png" alt="">
 			<progress id="status-progress"></progress>
 			<div id="status-notice"></div>
