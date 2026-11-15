@@ -16,6 +16,7 @@ const DICT := {
     "training": ["ТРЕНИРОВКА", "TRAINING"],
     "howto": ["КАК ИГРАТЬ", "HOW TO PLAY"],
     "exit": ["ВЫХОД", "QUIT"],
+    "support": ["ПОДДЕРЖАТЬ", "SUPPORT"],
     "resume": ["ПРОДОЛЖИТЬ", "RESUME"],
     "belt": ["ПОЯС", "BELT"],
     "of": ["ИЗ", "OF"],

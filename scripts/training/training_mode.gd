@@ -1917,7 +1917,7 @@ func _debug_camera() -> void:
 func handle_key(event: InputEvent) -> String:
     if not (event is InputEventKey) or not event.pressed or event.echo:
         return ""
-    var key := (event as InputEventKey).keycode
+    var key := (event as InputEventKey).physical_keycode
     match key:
         KEY_ESCAPE:
             if repair_on:

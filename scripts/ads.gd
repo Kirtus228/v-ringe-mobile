@@ -29,6 +29,8 @@ var _log := false
 var _js_ready := false
 var _js_checked := false
 var _js_fail := ""
+## Ссылка на JS-колбэк звука (держать, иначе GC уберёт объект).
+var _mute_cb: JavaScriptObject = null
 var _cooldown := 0.0
 var _shown := 0
 var _tried := 0
@@ -57,50 +59,130 @@ func _setup() -> void:
 
 ## --- web / Yandex Games ------------------------------------------------------
 
-## Подгружаем SDK Яндекс Игр, только если страница открыта внутри площадки или
-## SDK уже есть. На обычном хостинге (GitHub Pages) init просто не поднимется —
-## игра работает как раньше, без рекламы.
+## v71s: SDK Яндекс Игр подключает bootstrap в самой странице
+## (web/yandex_bootstrap.js, вставляется в index.html при сборке): он грузит
+## официальный /sdk.js, вызывает YaGames.init(), отдаёт язык и сообщает платформе
+## о готовности игры (LoadingAPI.ready). Здесь мы только читаем статус и
+## регистрируем колбэки звука.
 func _setup_web() -> void:
 	_js_fail = ""
 	if not OS.has_feature("web"):
 		return
-	JavaScriptBridge.eval("""
-	(function () {
-		if (window.__vringeAdsBoot) { return; }
-		window.__vringeAdsBoot = true;
-		window.__vringeAdsReady = false;
-		window.__vringeAdsError = "";
-		function markReady() { window.__vringeAdsReady = true; }
-		function load() {
-			if (window.YaGames) {
-				YaGames.init().then(function (sdk) {
-					window.__vringeSdk = sdk;
-					markReady();
-				}).catch(function (e) { window.__vringeAdsError = String(e); });
-				return;
-			}
-			// площадки нет — пробуем подтянуть SDK, он нужен только внутри Яндекс Игр
-			var s = document.createElement('script');
-			s.src = 'https://yandex.ru/games/sdk/v2';
-			s.onload = function () {
-				if (window.YaGames) { load(); } else { window.__vringeAdsError = 'no_sdk'; }
+	# Колбэк «включить/выключить звук»: страница зовёт его при потере фокуса,
+	# паузе площадки и показе рекламы (требования 1.3 и 4.7). Ссылку на объект
+	# держим в поле, иначе его соберёт GC и вызовы из JS отвалятся.
+	_mute_cb = JavaScriptBridge.create_callback(_on_page_mute)
+	var win := JavaScriptBridge.get_interface("window")
+	if win != null:
+		win.set("__vringeMuteGd", _mute_cb)
+		JavaScriptBridge.eval("""
+		(function () {
+			window.__vringeMute = function (on) {
+				try { if (window.__vringeMuteGd) { window.__vringeMuteGd(on === true); } } catch (e) {}
 			};
-			s.onerror = function () { window.__vringeAdsError = 'sdk_offline'; };
-			document.head.appendChild(s);
-		}
-		load();
-	})();
-	""", true)
+		})();
+		""", true)
 	provider = "yandex"
 
 
-func _poll_web() -> void:
-	if _js_checked or provider != "yandex":
+## Колбэк из страницы: нужно заглушить/вернуть звук игры.
+func _on_page_mute(args: Array) -> void:
+	var on: bool = bool(args[0]) if args.size() > 0 else false
+	_set_master_mute(on)
+
+
+## Глушим мастер-шину. Отдельно запоминаем, что звук выключен именно нами,
+## чтобы не перебить пользовательские настройки громкости.
+var _page_muted := false
+
+
+func _set_master_mute(on: bool) -> void:
+	if _page_muted == on:
 		return
-	_js_checked = true
-	_js_fail = str(JavaScriptBridge.eval("window.__vringeAdsError || ''", true))
-	_js_ready = bool(JavaScriptBridge.eval("window.__vringeAdsReady === true", true))
-	if not _js_ready and _log:
+	_page_muted = on
+	var idx := AudioServer.get_bus_index("Master")
+	if idx >= 0:
+		AudioServer.set_bus_mute(idx, on)
+
+
+func is_page_muted() -> bool:
+	return _page_muted
+
+
+## Игра загрузилась и показывает меню — можно сообщить платформе, что готово
+## (иначе «экран загрузки» у Яндекса висит и модерация ругается, п. 1.14).
+func notify_game_ready() -> void:
+	if provider != "yandex":
+		return
+	JavaScriptBridge.eval("if (window.__vringeSignalReady) { window.__vringeSignalReady(); }", true)
+
+
+## v71s: игра открыта внутри площадки Яндекс Игр? Только на web и только если
+## страница (web/yandex_bootstrap.js) подтвердила: iframe + домен/referrer Яндекса
+## или успешно поднятый SDK (window.__vringeHosted === true).
+##
+## Важно: одного «мы в iframe» недостаточно — itch.io и GitHub Pages тоже грузят
+## игру в iframe. Там признак остаётся false, и кнопка «ПОДДЕРЖАТЬ» (boosty.to,
+## внешняя ссылка) должна показываться. Внутри Яндекса внешние ссылки запрещены
+## правилами площадки — кнопку убираем, ссылку не открываем.
+func is_hosted() -> bool:
+	if not OS.has_feature("web"):
+		return false
+	return bool(JavaScriptBridge.eval("window.__vringeHosted === true", true))
+
+
+## Чем площадка подтвердилась: "frame+host" (домен/referrer Яндекса) или "sdk"
+## (YaGames.init ответил). Пусто — не площадка. Для лога и отладки.
+func hosted_reason() -> String:
+	if not OS.has_feature("web"):
+		return ""
+	return str(JavaScriptBridge.eval("window.__vringeHostedBy || ''", true))
+
+
+## v71t: разметка геймплея для площадки (п. 1.19.3) — сообщаем Яндексу, когда
+## идёт игра, а когда меню/результат. Вызовы безопасны: нет SDK/API — тишина.
+func gameplay_start() -> void:
+	if provider != "yandex":
+		return
+	JavaScriptBridge.eval("if (window.__vringeGameplay) { window.__vringeGameplay(true); }", true)
+
+
+func gameplay_stop() -> void:
+	if provider != "yandex":
+		return
+	JavaScriptBridge.eval("if (window.__vringeGameplay) { window.__vringeGameplay(false); }", true)
+
+
+## Язык, который отдаёт площадка (i18n), пусто — если SDK не поднялся.
+func sdk_lang() -> String:
+	if provider != "yandex":
+		return ""
+	return str(JavaScriptBridge.eval("window.__vringeLang || ''", true)).to_lower()
+
+
+## Почему SDK не готов (для лога/отладки).
+func sdk_error() -> String:
+	if provider != "yandex":
+		return ""
+	return str(JavaScriptBridge.eval("window.__vringeSdkError || ''", true))
+
+
+## Опрашивать статус SDK: он инициализируется асинхронно, поэтому проверяем
+## несколько секунд, а не один раз (иначе «готов» остаётся false навсегда).
+var _sdk_poll_t := 0.0
+
+
+func _poll_web() -> void:
+	if _js_ready or provider != "yandex":
+		return
+	if _sdk_poll_t <= 0.0:
+		_sdk_poll_t = 0.0
+	_sdk_poll_t += 0.0
+	_js_fail = sdk_error()
+	_js_ready = bool(JavaScriptBridge.eval("window.__vringeSdkReady === true", true))
+	if _js_ready:
+		print("ADS web: SDK Яндекс Игр готов, язык=", sdk_lang())
+	elif _log:
 		print("ADS web: SDK пока не готов (", _js_fail, ")")
 
 
@@ -135,7 +217,7 @@ func _load_admob_ids() -> void:
 func _process(delta: float) -> void:
 	if _cooldown > 0.0:
 		_cooldown = maxf(0.0, _cooldown - delta)
-	if provider == "yandex" and not _js_ready and not _js_checked:
+	if provider == "yandex" and not _js_ready:
 		_poll_web()
 
 
@@ -165,16 +247,28 @@ func show_interstitial(tag: String = "") -> bool:
 		return false
 	match provider:
 		"yandex":
+			# 4.7: пока идёт полноэкранная реклама, звук игры заглушён; страница
+			# вернёт его сама в onClose/onError через __vringeMute.
 			JavaScriptBridge.eval("""
 			(function () {
 				try {
 					if (!window.__vringeSdk || !window.__vringeSdk.adv) { return; }
+					if (window.__vringeMute) { window.__vringeMute(true); }
 					window.__vringeSdk.adv.showFullscreenAdv({callbacks: {
-						onClose: function (wasShown) { window.__vringeLastAd = wasShown === true; },
-						onError: function (e) { window.__vringeLastAd = false; }
+						onClose: function (wasShown) {
+							window.__vringeLastAd = wasShown === true;
+							if (window.__vringeMute) { window.__vringeMute(false); }
+						},
+						onError: function (e) {
+							window.__vringeLastAd = false;
+							if (window.__vringeMute) { window.__vringeMute(false); }
+						}
 					}});
 					window.__vringeLastAd = true;
-				} catch (e) { window.__vringeLastAd = false; }
+				} catch (e) {
+					window.__vringeLastAd = false;
+					if (window.__vringeMute) { window.__vringeMute(false); }
+				}
 			})();
 			""", true)
 		"admob":
@@ -224,7 +318,7 @@ func _log_skip(tag: String) -> void:
 func debug_state() -> Dictionary:
 	return {"provider": provider, "enabled": enabled, "ready": ready_to_show(),
 			"shown": _shown, "tried": _tried, "fights": fights_since_ad,
-			"web_ready": _js_ready, "web_error": _js_fail,
+			"web_ready": _js_ready, "web_error": _js_fail, "hosted": is_hosted(),
 			"admob_id": admob_interstitial_id != ""}
 
 

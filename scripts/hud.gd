@@ -1,4 +1,4 @@
-﻿extends CanvasLayer
+extends CanvasLayer
 ## HUD: полоски здоровья/выносливости, таймер, очки и экраны поверх сцены.
 
 const W := 1280.0
@@ -535,12 +535,24 @@ func set_timer(seconds: float, rnd: int = 0, total: int = 0) -> void:
             round_lbl.text = Lang.t("round")
 
 
+## v71v: в веб/площадочной сборке номер версии в меню НЕ показываем — это
+## «следы разработки» (п. 1.15 требований Яндекса). На Windows и Android
+## строка остаётся прежней («РАННИЙ ДОСТУП · v71»).
+func _version_text() -> String:
+    if OS.has_feature("web"):
+        return ""
+    return Lang.t("version")
+
+
 func set_score(value: int, combo: int, high: int) -> void:
     score_lbl.text = str(value)
     # v51: версия видна и в бою (мелко, справа снизу) — по скриншоту сразу понятно,
-    # какая сборка стоит на устройстве
-    hs_lbl.text = Lang.t("record").to_upper() + " " + str(high) + " · " \
-            + Lang.t("version").get_slice("·", 1).strip_edges()
+    # какая сборка стоит на устройстве. v71v: на web версию не показываем (след
+    # разработки, п. 1.15), остаётся только «РЕКОРД N».
+    var rec := Lang.t("record").to_upper() + " " + str(high)
+    if not OS.has_feature("web"):
+        rec += " · " + Lang.t("version").get_slice("·", 1).strip_edges()
+    hs_lbl.text = rec
     if combo >= 2:
         combo_lbl.text = "СЕРИЯ ×" + str(combo)
     else:
@@ -843,6 +855,11 @@ func show_menu(d: Dictionary) -> void:
     var row2: Array = [
         ["arenas", Lang.t("arenas") + suf + ("" if tm else "B")],
     ]
+    # v71s: внутри Яндекс Игр внешние ссылки запрещены — кнопку «ПОДДЕРЖАТЬ»
+    # (boosty.to) в меню не показываем. Вне площадки (itch, GitHub Pages, exe)
+    # поведение прежнее. Флаг приходит из main (_menu_data -> ads.is_hosted()).
+    if not bool(d.get("hosted", false)):
+        row2.append(["support", Lang.t("support") + suf])
     # v71m: в веб-версии и на телефоне сети и кооператива нет (ENet в Web не
     # работает; на телефоне по просьбе заказчика оставлена только одиночная игра).
     var net_ui := bool(d.get("net_ui", true))
@@ -903,22 +920,29 @@ func show_menu(d: Dictionary) -> void:
             Vector2(stats_w, howto_h), "stats")
     _btn(Lang.t("howto") + suf + ("" if tm else "H"), Vector2(howto_x, top_y),
             Vector2(howto_w, howto_h), "howto")
+    var show_exit := bool(d.get("exit_ui", true))
     if tm:
         # на телефоне «ВЫХОД» уходит в левый верхний угол, чтобы не делить
         # нижнюю зону с крупными кнопками
-        _btn(Lang.t("exit"), Vector2(48.0 + sl, top_y), Vector2(176.0, 96.0), "exit")
-        _overlay_label(Lang.t("version"), 48.0 + sl, 124.0 + _safe.y, 420, 10,
-                Color(0.62, 0.66, 0.74), HORIZONTAL_ALIGNMENT_LEFT, false)
+        if show_exit:
+            _btn(Lang.t("exit"), Vector2(48.0 + sl, top_y), Vector2(176.0, 96.0), "exit")
+        var vtxt := _version_text()
+        if vtxt != "":
+            _overlay_label(vtxt, 48.0 + sl, 124.0 + _safe.y, 420, 10,
+                    Color(0.62, 0.66, 0.74), HORIZONTAL_ALIGNMENT_LEFT, false)
         # v48: строка «чем рендерится» — по ней видно, почему на телефоне
         # могут не строиться арены (рендерер/видеокарта)
         if String(d.get("gfx", "")) != "":
             _overlay_label(String(d.get("gfx", "")), 48.0 + sl, 140.0 + _safe.y, 620, 9,
                     Color(0.45, 0.50, 0.58), HORIZONTAL_ALIGNMENT_LEFT, false)
     else:
-        _btn(Lang.t("exit"), Vector2(cs.x - 34.0 - sr - 104.0 * scale, y_exit),
-                Vector2(104.0 * scale, 32), "exit")
-        _overlay_label(Lang.t("version"), 48.0 + sl, 20.0 + _safe.y, 420, 10,
-                Color(0.62, 0.66, 0.74), HORIZONTAL_ALIGNMENT_LEFT, false)
+        if show_exit:
+            _btn(Lang.t("exit"), Vector2(cs.x - 34.0 - sr - 104.0 * scale, y_exit),
+                    Vector2(104.0 * scale, 32), "exit")
+        var vtxt2 := _version_text()
+        if vtxt2 != "":
+            _overlay_label(vtxt2, 48.0 + sl, 20.0 + _safe.y, 420, 10,
+                    Color(0.62, 0.66, 0.74), HORIZONTAL_ALIGNMENT_LEFT, false)
         if String(d.get("gfx", "")) != "":
             _overlay_label(String(d.get("gfx", "")), 48.0 + sl, 34.0 + _safe.y, 620, 9,
                     Color(0.45, 0.50, 0.58), HORIZONTAL_ALIGNMENT_LEFT, false)
@@ -2113,32 +2137,37 @@ func _settings_game(d: Dictionary) -> void:
                 Color(0.55, 0.86, 0.62), HORIZONTAL_ALIGNMENT_LEFT, false)
     var armed := bool(d.get("reset_armed", false))
     var blood_txt := String(d.get("blood_text", Lang.t("blood_off")))
-    var names := [Lang.t("language"), Lang.t("fullscreen"), Lang.t("blood"),
+    # v71t: набор строк приходит из main. Внутри площадки строки «кровь» нет
+    # (кровь жёстко OFF под рейтинг 12+) — id 2 в списке отсутствует.
+    var game_rows: Array = d.get("game_rows", [0, 1, 2, 3])
+    var names_all := [Lang.t("language"), Lang.t("fullscreen"), Lang.t("blood"),
             Lang.t("reset_progress")]
-    var vals := ["РУССКИЙ" if lang == "ru" else "ENGLISH",
+    var vals_all := ["РУССКИЙ" if lang == "ru" else "ENGLISH",
             Lang.t("on") if full else Lang.t("off"),
             blood_txt,
             Lang.t("reset_armed") if armed else "—"]
-    for i in 4:
-        var y := (300.0 + float(i) * 84.0) if touch_mode else (292.0 + float(i) * 66.0)
+    for gi in game_rows.size():
+        var row := int(game_rows[gi])
+        var y := (300.0 + float(gi) * 84.0) if touch_mode else (292.0 + float(gi) * 66.0)
         var row_h := TOUCH_MIN * 0.8 if touch_mode else 54.0
-        var row_col := TEXT if i < 3 else (RED if armed else Color(0.86, 0.62, 0.62))
-        if i == sel:
+        var row_col := TEXT if row != 3 else (RED if armed else Color(0.86, 0.62, 0.62))
+        if gi == sel:
             _overlay_rect(268, y - 22, 744, row_h, Color(ACCENT.r, ACCENT.g, ACCENT.b, 0.14))
             _overlay_rect(268, y - 22, 4, row_h, ACCENT)
-        _overlay_label(names[i], 300, y - 8, 300, 19, row_col, HORIZONTAL_ALIGNMENT_LEFT, i == sel)
-        _overlay_label(vals[i], 760, y - 8, 220, 17, AMBER, HORIZONTAL_ALIGNMENT_RIGHT)
+        _overlay_label(names_all[row], 300, y - 8, 300, 19, row_col,
+                HORIZONTAL_ALIGNMENT_LEFT, gi == sel)
+        _overlay_label(vals_all[row], 760, y - 8, 220, 17, AMBER, HORIZONTAL_ALIGNMENT_RIGHT)
         var sub := ""
-        if i == 0:
+        if row == 0:
             sub = Lang.t("lang_hint")
-        elif i == 1:
+        elif row == 1:
             sub = Lang.t("touch_full_hint") if touch_mode else Lang.t("full_hint")
-        elif i == 2:
+        elif row == 2:
             sub = Lang.t("blood_hint")
         else:
             sub = "нажми ещё раз, чтобы стереть всё" if not Lang.is_en() else "press again to wipe everything"
         _overlay_label(sub, 300, y + 20, 600, 10, MUTED, HORIZONTAL_ALIGNMENT_LEFT, false)
-        _hit(268, y - 22, 744, row_h, "gamerow%d" % i)
+        _hit(268, y - 22, 744, row_h, "gamerow%d" % row)
     var ghint := Lang.t("game_hint")
     if _is_touch(d):
         ghint = Lang.t("touch_game_hint")

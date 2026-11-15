@@ -656,12 +656,12 @@ func _on_role_changed(_id: int, _role: String) -> void:
 func handle_key(event: InputEvent) -> String:
     if not (event is InputEventKey) or not event.pressed or event.echo:
         return ""
-    if event.keycode == KEY_ESCAPE:
+    if event.physical_keycode == KEY_ESCAPE:
         if NetworkManager.in_match:
             return ""
         _on_leave()
         return "menu"
-    match event.keycode:
+    match event.physical_keycode:
         KEY_R:
             _on_ready()
         KEY_S:

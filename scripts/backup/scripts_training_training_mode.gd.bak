@@ -1,0 +1,1234 @@
+class_name TrainingMode
+extends Node3D
+## Режим «Тренировка» Этапа 3: хаб с 5 локациями → локация → станции.
+## Всё строится процедурно (в проекте нет сцен): хаб — UI-карточки, локация —
+## комната со станциями (Area3D + Label3D), упражнения — по StationDef.kind.
+## main.gd только создаёт модуль и переключает состояния/ввод; прогресс станций,
+## прочность и визиты лежат в SaveManager ([training]), статы — в StatsManager.
+##
+## Публичный API для main.gd: open_hub(), open_location(id), close(), show_hub(),
+## show_location(), tick(delta), update_camera(delta), handle_key(event).
+## Для тестов — begin_station/press_action/tick_station/station_result и т.п.
+
+const Lang = preload("res://scripts/lang.gd")
+const SECTION := "training"
+const StationScript := preload("res://scripts/training/station.gd")
+const FactoryScript := preload("res://scripts/training/training_config_factory.gd")
+const REPAIR_WINDOW := 0.30
+## на каком расстоянии (м) станция считается «ближайшей» для E
+const INTERACT_RADIUS := 2.0
+## границы комнаты для ходьбы (WASD)
+const WALK_MIN := Vector2(-4.2, -3.0)
+const WALK_MAX := Vector2(4.2, 3.6)
+
+var main: Node
+var config: TrainingConfig
+var locations: Array[TrainingLocationDef] = []
+var profile := InputProfile.new()
+
+var active := false
+var screen := "hub"          # hub | loc
+var current_location_id := ""
+var sel := 0
+var last_result: Dictionary = {}
+var result_open := false
+## id ближайшей станции (подсветка + запуск по E), "" — нет в радиусе
+var _nearest_id := ""
+
+var location_root: Node3D
+var camera: Camera3D
+var stations: Dictionary = {}   # id -> Node3D (TrainingStation)
+var station: Node3D = null
+var order: Array[String] = []   # порядок станций текущей локации
+
+var repair_on := false
+var _repair_loc := ""
+var _repair_id := ""
+var _repair_prompt := -1.0
+var _repair_next := 0.6
+var repair_result := ""
+
+# --- UI
+var ui: CanvasLayer
+var _root: Control
+var _backdrop: ColorRect
+var _panel: ColorRect
+var _title: Label
+var _sub: Label
+var _hint: Label
+var _status: Label
+var _cards: Array[Button] = []
+var _station_btns: Array[Button] = []
+var _back_btn: Button
+var _overlay: ColorRect
+var _ov_title: Label
+var _ov_hint: Label
+var _ov_line1: Label
+var _ov_line2: Label
+
+
+func setup(main_ref: Node) -> void:
+    main = main_ref
+    config = FactoryScript.create_default()
+    locations = config.locations
+    _build_camera()
+    _build_ui()
+    ui.visible = false
+
+
+# ---------------------------------------------------------------- публичный API
+
+func open_hub() -> void:
+    active = true
+    screen = "hub"
+    sel = 0
+    result_open = false
+    _clear_room()
+    _hide_world(true)
+    if _player() != null:
+        _player().visible = false   # в хабе боец не нужен, только карточки
+    ui.visible = true
+    camera.position = Vector3(0.0, 2.0, 8.0)
+    camera.look_at(Vector3(0.0, 1.1, 0.0), Vector3.UP)
+    camera.make_current()
+    show_hub()
+
+
+func open_location(id: String) -> bool:
+    var loc := config.find_location(id)
+    if loc == null or not is_location_unlocked(id):
+        return false
+    active = true
+    screen = "loc"
+    current_location_id = id
+    sel = 0
+    result_open = false
+    station = null
+    repair_on = false
+    _clear_room()
+    _hide_world(true)
+    _build_room(loc)
+    _place_player(Vector3(0.0, 0.0, 3.2), Vector3(0.0, 0.0, -1.4))
+    ui.visible = true
+    camera.make_current()
+    _mark_visited(id)
+    _update_nearest()
+    show_location()
+    return true
+
+
+func close() -> void:
+    active = false
+    station = null
+    repair_on = false
+    result_open = false
+    _clear_room()
+    if ui != null:
+        ui.visible = false
+    _hide_world(false)
+    if main != null and main.get("cam") != null:
+        (main.cam as Camera3D).make_current()
+
+
+func show_hub() -> void:
+    screen = "hub"
+    _render_hub()
+
+
+func show_location() -> void:
+    screen = "loc"
+    _render_location()
+
+
+func is_active() -> bool:
+    return active
+
+
+func current_screen() -> String:
+    return screen
+
+
+func location_ids() -> Array[String]:
+    var ids: Array[String] = []
+    for l in locations:
+        ids.append(l.id)
+    return ids
+
+
+func station_ids(loc_id: String) -> Array[String]:
+    var ids: Array[String] = []
+    var loc := config.find_location(loc_id)
+    if loc == null:
+        return ids
+    for s in loc.stations:
+        ids.append(s.id)
+    return ids
+
+
+func location_of(loc_id: String) -> TrainingLocationDef:
+    return config.find_location(loc_id)
+
+
+func station_def(loc_id: String, st_id: String) -> StationDef:
+    return config.find_station(loc_id, st_id)
+
+
+## Разблокирована ли локация по её условию unlock (с учётом visited/статов).
+func is_location_unlocked(loc_id: String) -> bool:
+    var loc := config.find_location(loc_id)
+    if loc == null:
+        return false
+    if not config.use_location_unlocks:
+        return true
+    var u: Dictionary = loc.unlock
+    if u.is_empty():
+        return true
+    if u.has("visited"):
+        for v in u["visited"]:
+            if not _load_bool("visited/" + String(v)):
+                return false
+        return true
+    if u.has("stat"):
+        var name := String(u["stat"])
+        var minimum := float(u.get("min", 0.0))
+        return StatsManager.get_stat(name) >= minimum if StatsManager != null else false
+    if u.has("any_stat"):
+        var arr: Array = u["any_stat"]
+        if arr.size() >= 2:
+            return StatsManager.get_stat(String(arr[0])) >= float(arr[1]) \
+                    if StatsManager != null else false
+    return true
+
+
+func unlock_text(loc_id: String) -> String:
+    var loc := config.find_location(loc_id)
+    if loc == null:
+        return ""
+    var u: Dictionary = loc.unlock
+    if u.has("visited"):
+        var names: Array[String] = []
+        for v in u["visited"]:
+            var vl := config.find_location(String(v))
+            names.append(vl.title if vl != null else String(v))
+        return Lang.t("train_need_visit") % ", ".join(names)
+    if u.has("stat"):
+        return Lang.t("train_need_stat") % [
+                _stat_name(String(u["stat"])), int(float(u.get("min", 0.0)))]
+    return ""
+
+
+# ---------------------------------------------------------------- станции
+
+func begin_station(st_id: String) -> bool:
+    if screen != "loc" or current_location_id == "":
+        return false
+    var st: Node3D = _station_by_id(st_id)
+    if st == null:
+        return false
+    result_open = false
+    repair_on = false
+    last_result = {}
+    station = st
+    return st.begin()
+
+
+func station_active() -> bool:
+    return station != null and station.active
+
+
+func station_finished() -> bool:
+    return station != null and station.finished
+
+
+func station_kind() -> int:
+    return station.kind() if station != null else -1
+
+
+func station_prompt_open() -> bool:
+    return station != null and station.prompt_open()
+
+
+func station_hold_progress() -> float:
+    return station.hold_progress() if station != null else 0.0
+
+
+func get_station() -> Node3D:
+    return station
+
+
+## Одно нажатие действия в активной станции.
+func press_action() -> String:
+    if station == null or not station.active:
+        return "ignored"
+    var r: String = station.press()
+    if r == "hit":
+        _play(station.def.sfx_hit)
+    elif r == "miss":
+        _play(station.def.sfx_fail)
+    return r
+
+
+## Покадровое обновление станции (held — удержание действия для HOLD).
+func tick_station(delta: float, held: bool = false) -> void:
+    if station == null:
+        return
+    station.tick(delta, held)
+    _update_overlay()
+
+
+func abort_station() -> void:
+    if station != null and station.active:
+        station.abort()
+    result_open = false
+
+
+func station_result() -> Dictionary:
+    if station == null:
+        return last_result.duplicate(true)
+    return {"station": station.def.id, "ok": station.ok, "reps": station.reps_done,
+            "mistakes": station.mistakes, "gain": station.gain.duplicate(true),
+            "durability": station.durability}
+
+
+func confirm_result() -> void:
+    result_open = false
+    _update_ui()
+
+
+## Починка сломанной станции: QTE-окно 0.3 с, успех восстанавливает прочность.
+func begin_repair(st_id: String) -> bool:
+    if screen != "loc":
+        return false
+    var st: Node3D = _station_by_id(st_id)
+    if st == null or not st.is_broken():
+        return false
+    repair_on = true
+    _repair_loc = current_location_id
+    _repair_id = st_id
+    _repair_prompt = -1.0
+    _repair_next = 0.6
+    repair_result = ""
+    result_open = false
+    last_result = {}
+    station = null
+    return true
+
+
+func repair_active() -> bool:
+    return repair_on
+
+
+func repair_prompt_open() -> bool:
+    return repair_on and _repair_prompt >= 0.0
+
+
+func tick_repair(delta: float) -> void:
+    if not repair_on:
+        return
+    if _repair_prompt >= 0.0:
+        _repair_prompt += delta
+        if _repair_prompt > REPAIR_WINDOW:
+            _repair_prompt = -1.0
+            repair_result = "miss"
+            _repair_next = 0.6
+    _repair_next -= delta
+    if _repair_prompt < 0.0 and _repair_next <= 0.0:
+        _repair_prompt = 0.0
+        _repair_next = 0.6
+    _update_overlay()
+
+
+func press_repair() -> String:
+    if not repair_on:
+        return "ignored"
+    if _repair_prompt < 0.0 or _repair_prompt > REPAIR_WINDOW:
+        repair_result = "miss"
+        _repair_prompt = -1.0
+        _repair_next = 0.6
+        return "miss"
+    var st: Node3D = _station_by_id(_repair_id)
+    if st != null:
+        st.durability = minf(config.durability_max, st.durability + config.repair_restore)
+        st.update_label()
+        _save_float("durability/%s/%s" % [_repair_loc, _repair_id], st.durability)
+    _flush()
+    repair_on = false
+    repair_result = "ok"
+    last_result = {"station": _repair_id, "ok": true, "repair": true,
+            "durability": st.durability if st != null else 0.0}
+    result_open = true
+    _play("shove")
+    _update_ui()
+    return "ok"
+
+
+func cancel_repair() -> void:
+    repair_on = false
+    repair_result = ""
+    _update_ui()
+
+
+# ---------------------------------------------------------------- прогресс
+
+func mastery(loc_id: String, st_id: String) -> float:
+    return _load_float("mastery/%s/%s" % [loc_id, st_id], 0.0)
+
+
+func durability(loc_id: String, st_id: String) -> float:
+    return _load_float("durability/%s/%s" % [loc_id, st_id], config.durability_max)
+
+
+func is_station_broken(loc_id: String, st_id: String) -> bool:
+    return durability(loc_id, st_id) <= 0.0
+
+
+func visits(loc_id: String) -> bool:
+    return _load_bool("visited/" + loc_id)
+
+
+## Звук промаха станции (станция зовёт при miss).
+func play_fail(st: Node3D) -> void:
+    _play(String(st.def.sfx_fail))
+
+
+## Станция успешно отработала повтор: статы с бонусом локации + мастерство.
+func station_gain(st: Node3D) -> void:
+    var applied := {}
+    for k in st.def.stat_bonus:
+        var amount: float = float(st.def.stat_bonus[k]) * float(st.location.bonus_mult(String(k)))
+        var got := StatsManager.add_stat(String(k), amount) if StatsManager != null else 0.0
+        applied[String(k)] = got
+        if got > 0.0:
+            st.gain[String(k)] = float(st.gain.get(String(k), 0.0)) + got
+    var key := "mastery/%s/%s" % [st.location.id, st.def.id]
+    _save_float(key, minf(100.0, mastery(st.location.id, st.def.id) + 1.0))
+    _flush()
+
+
+## Износ оборудования: одна успешная единица работы = wear_per_use прочности.
+func consume_wear(st: Node3D) -> void:
+    if float(st.def.wear_per_use) <= 0.0:
+        return
+    st.durability = maxf(0.0, st.durability - float(st.def.wear_per_use))
+    _save_float("durability/%s/%s" % [st.location.id, st.def.id], st.durability)
+    st.update_label()
+    _flush()
+
+
+func on_station_finished(st: Node3D) -> void:
+    result_open = true
+    last_result = station_result()
+    _update_ui()
+    _flush()
+
+
+# ---------------------------------------------------------------- кадр и ввод
+
+func tick(delta: float) -> void:
+    if not active:
+        return
+    var pressed := profile.is_action_just_pressed("train_qte") \
+            or profile.is_action_just_pressed("interact")
+    var held := profile.is_action_pressed("interact")
+    var player: Node3D = _player()
+    # ходьба и анимация бойца в комнате (бой в тренировке не тикает)
+    if screen == "loc" and player != null:
+        if not repair_on and not result_open \
+                and (station == null or not station.active):
+            _walk(delta, player)
+        player.tick(delta)
+        _update_nearest()
+    if repair_on:
+        tick_repair(delta)
+        if pressed and repair_prompt_open():
+            press_repair()
+    elif station != null and station.active:
+        if station.kind() == StationDef.Kind.HOLD:
+            if pressed:
+                press_action()
+            tick_station(delta, held)
+        else:
+            tick_station(delta, false)
+            if pressed:
+                press_action()
+    elif screen == "loc" and pressed and _nearest_id != "":
+        # главный путь: подошёл к станции и нажал E
+        begin_station(_nearest_id)
+    _update_overlay()
+
+
+## Движение игрока WASD относительно камеры (как в основном бою) + границы комнаты.
+func _walk(delta: float, player: Node3D) -> void:
+    var mv := profile.get_move_vector()
+    if mv.length() < 0.05:
+        return
+    var fwd: Vector3 = -camera.global_transform.basis.z
+    fwd.y = 0.0
+    fwd = fwd.normalized()
+    var right: Vector3 = camera.global_transform.basis.x
+    right.y = 0.0
+    right = right.normalized()
+    var dir := fwd * (-mv.y) + right * mv.x
+    if dir.length() < 0.01:
+        return
+    dir = dir.normalized()
+    player.drive(dir, delta)
+    player.position.x = clampf(player.position.x, WALK_MIN.x, WALK_MAX.x)
+    player.position.z = clampf(player.position.z, WALK_MIN.y, WALK_MAX.y)
+    # не проходим сквозь станции
+    for id in order:
+        var st: Node3D = stations[id]
+        var d := Vector2(player.position.x - st.position.x,
+                player.position.z - st.position.z)
+        if d.length() < 1.05 and d.length() > 0.001:
+            player.position += Vector3(d.normalized().x, 0.0, d.normalized().y) \
+                    * (1.05 - d.length())
+    player.look_at_target(player.position + dir)
+
+
+## Ближайшая станция в радиусе: подсветка + запуск по E.
+func _update_nearest() -> void:
+    _nearest_id = ""
+    var player: Node3D = _player()
+    if player == null or screen != "loc":
+        return
+    var best := INTERACT_RADIUS
+    for id in order:
+        var st: Node3D = stations[id]
+        var d := Vector2(player.position.x - st.position.x,
+                player.position.z - st.position.z).length()
+        if d < best:
+            best = d
+            _nearest_id = id
+    for id in order:
+        var st2: Node3D = stations[id]
+        st2.set_highlight(id == _nearest_id)
+    _refresh_near_hint()
+
+
+func nearest_station_id() -> String:
+    return _nearest_id
+
+
+func _player() -> Node3D:
+    if main == null or main.get("player") == null:
+        return null
+    return main.player as Node3D
+
+
+func _place_player(spawn: Vector3, look_at_p: Vector3) -> void:
+    var player: Node3D = _player()
+    if player == null:
+        return
+    player.reset(spawn, 100.0)
+    player.visible = true
+    player.look_at_target(Vector3(look_at_p.x, spawn.y, look_at_p.z))
+    player.tick(0.001)
+
+
+func get_player_pos() -> Vector3:
+    var player: Node3D = _player()
+    return player.position if player != null else Vector3.ZERO
+
+
+## Для тестов: поставить игрока в точку (без сброса статов/позы).
+func place_player_for_test(pos: Vector3) -> void:
+    var player: Node3D = _player()
+    if player != null:
+        player.position = pos
+        player.vel = Vector3.ZERO
+    _update_nearest()
+
+
+## Для тестов: пройти в направлении dir `seconds` секунд тем же путём, что и WASD.
+func walk_for_test(dir: Vector3, seconds: float) -> void:
+    var player: Node3D = _player()
+    if player == null:
+        return
+    var dt := 1.0 / 60.0
+    var n := int(maxf(1.0, seconds * 60.0))
+    for i in n:
+        player.drive(dir.normalized(), dt)
+        player.position.x = clampf(player.position.x, WALK_MIN.x, WALK_MAX.x)
+        player.position.z = clampf(player.position.z, WALK_MIN.y, WALK_MAX.y)
+        player.tick(dt)
+    _update_nearest()
+
+
+## Для тестов/тача: нажать E по ближайшей станции. true — упражнение началось.
+func interact_nearest() -> bool:
+    if _nearest_id == "":
+        return false
+    return begin_station(_nearest_id)
+
+
+## Экранная позиция станции (для тач-тапа по 3D-станции).
+func station_screen_pos(st_id: String) -> Vector2:
+    var st: Node3D = stations.get(st_id)
+    if st == null or camera == null:
+        return Vector2(-1000.0, -1000.0)
+    return camera.unproject_position(st.global_position + Vector3(0.0, 1.0, 0.0))
+
+
+## Тап по экрану: по 3D-станции — «подойти и нажать E», по оверлею — продолжить.
+func handle_touch(pos: Vector2) -> String:
+    if not active:
+        return ""
+    if repair_on:
+        if repair_prompt_open():
+            press_repair()
+        return ""
+    if result_open:
+        confirm_result()
+        return ""
+    if screen != "loc":
+        return ""
+    var best := ""
+    var best_d := 120.0
+    for id in order:
+        var sp := station_screen_pos(id)
+        var d := pos.distance_to(sp)
+        if d < best_d:
+            best_d = d
+            best = id
+    if best == "":
+        return ""
+    # тап по станции = interact: подводим бойца и запускаем упражнение
+    var st: Node3D = stations[best]
+    var player: Node3D = _player()
+    if player != null:
+        player.position = Vector3(st.position.x, 0.0, st.position.z + 1.6)
+        player.look_at_target(st.position)
+    _update_nearest()
+    begin_station(best)
+    return ""
+
+
+## Тап по карточке хаба (для тач-режима и тестов). Возвращает "loc"/"".
+func tap_hub_card(i: int) -> String:
+    if screen != "hub" or i < 0 or i >= locations.size():
+        return ""
+    if not is_location_unlocked(locations[i].id):
+        return ""
+    _on_card_pressed(i)
+    return "loc"
+
+
+func current_location() -> String:
+    return current_location_id
+
+
+func update_camera(delta: float) -> void:
+    if not active or camera == null:
+        return
+    if screen != "loc":
+        camera.position = camera.position.lerp(Vector3(0.0, 2.0, 8.0),
+                clampf(delta * 4.0, 0.0, 1.0))
+        camera.look_at(Vector3(0.0, 1.1, 0.0), Vector3.UP)
+        return
+    # камера как в основном бою: сбоку-сзади от бойца, плавно следит
+    var focus := get_player_pos()
+    var base := Vector3(3.0 + focus.x * 0.3, 3.1, 4.5 + focus.z * 0.4)
+    camera.position = camera.position.lerp(base, clampf(delta * 5.0, 0.0, 1.0))
+    camera.look_at(Vector3(focus.x * 0.35, 0.95, focus.z * 0.25), Vector3.UP)
+
+
+## Клавиатурная навигация. Возвращает "menu"/"hub"/"loc" — куда перейти main.gd.
+func handle_key(event: InputEvent) -> String:
+    if not (event is InputEventKey) or not event.pressed or event.echo:
+        return ""
+    var key := (event as InputEventKey).keycode
+    match key:
+        KEY_ESCAPE:
+            if repair_on:
+                cancel_repair()
+                return ""
+            if station != null and station.active:
+                abort_station()
+                _update_ui()
+                return ""
+            if result_open:
+                confirm_result()
+                return ""
+            if screen == "hub":
+                return "menu"
+            open_hub()
+            return "hub"
+        KEY_UP:
+            _move_sel(-1)
+            return ""
+        KEY_DOWN:
+            _move_sel(1)
+            return ""
+        KEY_ENTER, KEY_KP_ENTER, KEY_E:
+            if screen == "hub":
+                return _activate_hub()
+            if screen == "loc":
+                if result_open:
+                    confirm_result()
+                    return ""
+                if station != null and station.active:
+                    return ""
+                # главный путь: E у ближайшей станции; список — запасной
+                if _nearest_id != "":
+                    begin_station(_nearest_id)
+                    return ""
+                return _activate_station()
+    return ""
+
+
+func _move_sel(d: int) -> void:
+    var n := locations.size() if screen == "hub" else order.size()
+    if n <= 0:
+        return
+    sel = wrapi(sel + d, 0, n)
+    if screen == "hub":
+        _render_hub()
+    else:
+        _render_location()
+
+
+func _activate_hub() -> String:
+    if sel < 0 or sel >= locations.size():
+        return ""
+    var loc := locations[sel]
+    if not is_location_unlocked(loc.id):
+        return ""
+    open_location(loc.id)
+    return "loc"
+
+
+func _activate_station() -> String:
+    if sel < 0 or sel >= order.size():
+        return ""
+    var st: Node3D = _station_by_id(order[sel])
+    if st == null:
+        return ""
+    var player: Node3D = _player()
+    if player != null:
+        player.position = Vector3(st.position.x, 0.0, st.position.z + 1.6)
+        player.look_at_target(st.position)
+    if st.is_broken():
+        begin_repair(order[sel])
+        return ""
+    begin_station(order[sel])
+    _update_nearest()
+    return ""
+
+
+func _on_card_pressed(i: int) -> void:
+    sel = i
+    if is_location_unlocked(locations[i].id):
+        open_location(locations[i].id)
+        _notify_main("loc")
+
+
+func _on_station_pressed(i: int) -> void:
+    sel = i
+    _activate_station()
+    _update_ui()
+
+
+func _notify_main(to: String) -> void:
+    if main != null and main.has_method("_on_training_nav"):
+        main._on_training_nav(to)
+
+
+# ---------------------------------------------------------------- сцена
+
+func _build_camera() -> void:
+    camera = Camera3D.new()
+    camera.name = "TrainingCamera"
+    camera.fov = 52.0
+    add_child(camera)
+    camera.position = Vector3(0.0, 2.0, 8.0)
+
+
+func _build_room(loc: TrainingLocationDef) -> void:
+    location_root = Node3D.new()
+    location_root.name = "Room_" + loc.id
+    add_child(location_root)
+    # пол
+    var floor := MeshInstance3D.new()
+    var fm := BoxMesh.new()
+    fm.size = Vector3(11.0, 0.2, 9.0)
+    floor.mesh = fm
+    var fmat := StandardMaterial3D.new()
+    fmat.albedo_color = loc.floor_color
+    fmat.roughness = 0.92
+    fmat.emission_enabled = true
+    fmat.emission = loc.floor_color * 0.35
+    floor.material_override = fmat
+    floor.position = Vector3(0.0, -0.1, 0.0)
+    location_root.add_child(floor)
+    # задняя стена
+    var wall := MeshInstance3D.new()
+    var wm := BoxMesh.new()
+    wm.size = Vector3(11.0, 3.4, 0.2)
+    wall.mesh = wm
+    var wmat := StandardMaterial3D.new()
+    wmat.albedo_color = loc.floor_color.darkened(0.35)
+    wmat.roughness = 0.95
+    wmat.emission_enabled = true
+    wmat.emission = loc.floor_color.darkened(0.35) * 0.3
+    wall.material_override = wmat
+    wall.position = Vector3(0.0, 1.7, -4.2)
+    location_root.add_child(wall)
+    # боковые стены: чтобы комната не висела в пустоте
+    for sx in [-5.5, 5.5]:
+        var side := MeshInstance3D.new()
+        var sm := BoxMesh.new()
+        sm.size = Vector3(0.2, 3.4, 9.0)
+        side.mesh = sm
+        var smat := StandardMaterial3D.new()
+        smat.albedo_color = loc.floor_color.darkened(0.45)
+        smat.roughness = 0.95
+        smat.emission_enabled = true
+        smat.emission = loc.floor_color.darkened(0.45) * 0.25
+        side.material_override = smat
+        side.position = Vector3(sx, 1.7, 0.0)
+        location_root.add_child(side)
+    # свет локации: направленный «солнечный» + заполняющий, иначе комната тёмная
+    var sun := DirectionalLight3D.new()
+    sun.light_color = loc.light_color
+    sun.light_energy = loc.light_energy * 1.15
+    sun.shadow_enabled = false
+    sun.rotation_degrees = Vector3(-55.0, -35.0, 0.0)
+    location_root.add_child(sun)
+    var light := OmniLight3D.new()
+    light.light_color = loc.light_color
+    light.light_energy = loc.light_energy * 1.6
+    light.omni_range = 16.0
+    light.position = Vector3(0.0, 3.6, 2.4)
+    location_root.add_child(light)
+    # станции в ряд справа от панели локации (панель занимает левые 440 px)
+    stations.clear()
+    order.clear()
+    var n := loc.stations.size()
+    for i in n:
+        var def: StationDef = loc.stations[i]
+        var st: Node3D = StationScript.new()
+        location_root.add_child(st)
+        var x := 0.4 + 1.5 * float(i) if n > 1 else 1.6
+        st.position = Vector3(x, 0.0, -1.4)
+        st.setup(def, loc, self)
+        st.durability = durability(loc.id, def.id)
+        st.durability_max = config.durability_max
+        st.update_label()
+        st.set_label_text(_st_title(loc.id, def))
+        stations[def.id] = st
+        order.append(def.id)
+    camera.position = Vector3(0.0, 2.4, 6.4)
+    camera.look_at(Vector3(1.4, 1.05, -1.4), Vector3.UP)
+
+
+func _clear_room() -> void:
+    if location_root != null:
+        remove_child(location_root)
+        location_root.queue_free()
+        location_root = null
+    stations.clear()
+    order.clear()
+
+
+func _station_by_id(st_id: String) -> Node3D:
+    var st: Node3D = stations.get(st_id)
+    return st
+
+
+func _hide_world(hidden: bool) -> void:
+    if main == null:
+        return
+    # арена и соперник в тренировке не нужны, а игрок стоит в комнате и ходит
+    if main.get("arena") != null:
+        (main.arena as Node3D).visible = not hidden
+    if main.get("enemy") != null:
+        (main.enemy as Node3D).visible = not hidden
+    if main.get("player") != null and not hidden:
+        var player: Node3D = main.player
+        player.visible = true
+        player.position = Vector3(0, 0, 1.9)
+
+
+# ---------------------------------------------------------------- сохранение
+
+func _load_float(key: String, def: float) -> float:
+    if SaveManager == null:
+        return def
+    return float(SaveManager.load_value(SECTION, key, def))
+
+
+func _load_bool(key: String, def: bool = false) -> bool:
+    if SaveManager == null:
+        return def
+    return bool(SaveManager.load_value(SECTION, key, def))
+
+
+func _save_float(key: String, value: float) -> void:
+    if SaveManager != null:
+        SaveManager.save_value(SECTION, key, value)
+
+
+func _mark_visited(loc_id: String) -> void:
+    if SaveManager == null:
+        return
+    SaveManager.save_value(SECTION, "visited/" + loc_id, true)
+    _flush()
+
+
+func _flush() -> void:
+    if SaveManager != null:
+        SaveManager.flush()
+
+
+## Только для тестов: очистить прогресс тренировки в сейве.
+func reset_training_save() -> void:
+    if SaveManager == null:
+        return
+    SaveManager.data[SECTION] = {}
+    SaveManager.flush()
+
+
+# ---------------------------------------------------------------- тексты RU/EN
+
+## Английский текст локации/станции (RU берётся из конфига).
+func _en(key: String, field: String, fallback: String) -> String:
+    if Lang.code != "en":
+        return fallback
+    return FactoryScript.en_text(key, field, fallback)
+
+
+func _loc_title(loc: TrainingLocationDef) -> String:
+    return _en("loc/" + loc.id, "title", loc.title)
+
+
+func _loc_desc(loc: TrainingLocationDef) -> String:
+    return _en("loc/" + loc.id, "desc", loc.description)
+
+
+func _st_title(loc_id: String, st: StationDef) -> String:
+    return _en("station/%s/%s" % [loc_id, st.id], "title", st.title)
+
+
+func _st_desc(loc_id: String, st: StationDef) -> String:
+    return _en("station/%s/%s" % [loc_id, st.id], "desc", st.description)
+
+
+func _stations_text(loc: TrainingLocationDef) -> String:
+    var parts: Array[String] = []
+    for st in loc.stations:
+        parts.append(_st_title(loc.id, st))
+    return ", ".join(parts)
+
+
+## Суммарное мастерство локации (0..100 на каждую станцию).
+func _loc_mastery_total(loc: TrainingLocationDef) -> int:
+    var total := 0
+    for st in loc.stations:
+        total += int(mastery(loc.id, st.id))
+    return total
+
+
+func _loc_mastery_max(loc: TrainingLocationDef) -> int:
+    return maxi(1, loc.stations.size()) * 100
+
+
+func _back_to_hub() -> void:
+    open_hub()
+    _notify_main("hub")
+
+
+func _go_menu() -> void:
+    _notify_main("menu")
+
+
+# ---------------------------------------------------------------- UI
+
+func _build_ui() -> void:
+    ui = CanvasLayer.new()
+    ui.layer = 6
+    add_child(ui)
+    _root = Control.new()
+    _root.set_anchors_preset(Control.PRESET_FULL_RECT)
+    _root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    ui.add_child(_root)
+    _backdrop = ColorRect.new()
+    _backdrop.color = Color(0.02, 0.03, 0.05, 0.985)
+    _backdrop.set_anchors_preset(Control.PRESET_FULL_RECT)
+    _backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    _root.add_child(_backdrop)
+    _panel = ColorRect.new()
+    _panel.color = Color(0.6, 0.6, 0.7, 0.0)
+    _panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    _root.add_child(_panel)
+    _title = _mk_label(Vector2(0, 46), Vector2(1280, 60), 40, Color(0.98, 0.86, 0.45))
+    _sub = _mk_label(Vector2(0, 108), Vector2(1280, 30), 18, Color(0.80, 0.84, 0.92))
+    _hint = _mk_label(Vector2(0, 660), Vector2(1280, 26), 16, Color(0.62, 0.68, 0.78))
+    _status = _mk_label(Vector2(0, 624), Vector2(1280, 26), 18, Color(0.95, 0.75, 0.35))
+    for i in 5:
+        var b := _mk_button(Vector2(210, 146 + i * 104), Vector2(860, 96))
+        b.add_theme_font_size_override("font_size", 15)
+        b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+        b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+        b.pressed.connect(_on_card_pressed.bind(i))
+        _cards.append(b)
+    for i in 4:
+        var b := _mk_button(Vector2(18, 180 + i * 72), Vector2(434, 64))
+        b.add_theme_font_size_override("font_size", 16)
+        b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+        b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+        b.pressed.connect(_on_station_pressed.bind(i))
+        _station_btns.append(b)
+    _back_btn = _mk_button(Vector2(18, 596), Vector2(200, 46))
+    _back_btn.text = Lang.t("train_back_hub_btn")
+    _back_btn.add_theme_font_size_override("font_size", 18)
+    _back_btn.pressed.connect(_back_to_hub)
+    _back_btn.visible = false
+    _overlay = ColorRect.new()
+    _overlay.color = Color(0.06, 0.07, 0.10, 0.95)
+    _overlay.position = Vector2(640, 168)
+    _overlay.size = Vector2(600, 360)
+    _overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    _root.add_child(_overlay)
+    _ov_title = _mk_label(Vector2(660, 190), Vector2(560, 44), 30, Color(0.98, 0.86, 0.45))
+    _ov_hint = _mk_label(Vector2(660, 244), Vector2(560, 30), 17, Color(0.84, 0.88, 0.96))
+    _ov_line1 = _mk_label(Vector2(660, 292), Vector2(560, 28), 20, Color(0.96, 0.96, 1.0))
+    _ov_line2 = _mk_label(Vector2(660, 336), Vector2(560, 26), 17, Color(0.72, 0.78, 0.88))
+    _overlay.visible = false
+
+
+func _mk_label(pos: Vector2, size: Vector2, font_size: int, color: Color) -> Label:
+    var l := Label.new()
+    l.position = pos
+    l.size = size
+    l.add_theme_font_size_override("font_size", font_size)
+    l.add_theme_color_override("font_color", color)
+    l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+    l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+    l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    _root.add_child(l)
+    return l
+
+
+func _mk_button(pos: Vector2, size: Vector2) -> Button:
+    var b := Button.new()
+    b.position = pos
+    b.size = size
+    b.add_theme_font_size_override("font_size", 20)
+    b.text = ""
+    _root.add_child(b)
+    return b
+
+
+func _render_hub() -> void:
+    _backdrop.visible = true
+    _back_btn.visible = false
+    _panel.color = Color(0.6, 0.6, 0.7, 0.0)
+    _overlay.visible = false
+    _title.text = Lang.t("train_title")
+    _title.position = Vector2(0, 22)
+    _title.size = Vector2(1280, 50)
+    _sub.text = Lang.t("train_sub")
+    _sub.position = Vector2(0, 72)
+    _sub.size = Vector2(1280, 24)
+    _hint.text = Lang.t("train_hub_hint")
+    _hint.position = Vector2(0, 676)
+    _hint.size = Vector2(1280, 26)
+    _status.text = ""
+    for i in _cards.size():
+        var b := _cards[i]
+        var loc := locations[i]
+        var unlocked := is_location_unlocked(loc.id)
+        var total := _loc_mastery_total(loc)
+        var max_total := _loc_mastery_max(loc)
+        var head: String
+        if unlocked:
+            head = "%s · %s" % [_loc_title(loc), Lang.t("train_open")]
+        else:
+            head = "%s · %s: %s" % [_loc_title(loc), Lang.t("train_locked"), unlock_text(loc.id)]
+        var bonus_line: String = Lang.t("train_bonus") % _bonus_text(loc)
+        b.text = "%s\n%s\n%s: %s\n%s · %s %d/%d" % [
+                head, _loc_desc(loc), Lang.t("train_stations"), _stations_text(loc),
+                bonus_line, Lang.t("train_mastery_short"), total, max_total]
+        b.visible = true
+        b.position = Vector2(210, 146 + i * 104)
+        b.disabled = not unlocked
+        if not unlocked:
+            b.add_theme_color_override("font_color", Color(0.58, 0.60, 0.66))
+        else:
+            b.add_theme_color_override("font_color",
+                    Color(0.98, 0.86, 0.45) if i == sel else Color(0.92, 0.94, 0.98))
+    for b in _station_btns:
+        b.visible = false
+
+
+func _render_location() -> void:
+    var loc := config.find_location(current_location_id)
+    if loc == null:
+        return
+    # комнату показываем напрямую: затемнение хаба здесь не нужно
+    _backdrop.visible = false
+    _back_btn.visible = true
+    _back_btn.position = Vector2(18, 592)
+    _panel.color = Color(0.03, 0.04, 0.06, 0.82)
+    _panel.position = Vector2(0, 0)
+    _panel.size = Vector2(470, 720)
+    _title.text = _loc_title(loc)
+    _title.position = Vector2(0, 36)
+    _title.size = Vector2(470, 50)
+    # описание: перенос по словам и ширина панели, чтобы текст не уезжал в 3D
+    _sub.text = _loc_desc(loc)
+    _sub.position = Vector2(18, 96)
+    _sub.size = Vector2(434, 64)
+    _sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+    _sub.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    _sub.add_theme_font_size_override("font_size", 15)
+    _hint.text = Lang.t("train_walk_hint")
+    _hint.position = Vector2(18, 652)
+    _hint.size = Vector2(434, 44)
+    _hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+    _hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    _status.text = ""
+    _status.position = Vector2(18, 540)
+    _status.size = Vector2(434, 42)
+    _status.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+    _status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+    if _nearest_id != "":
+        var near_st: Node3D = _station_by_id(_nearest_id)
+        if near_st != null:
+            _status.text = Lang.t("train_near") % _st_title(current_location_id, near_st.def)
+    for b in _cards:
+        b.visible = false
+    _overlay.visible = false
+    for i in _station_btns.size():
+        var b := _station_btns[i]
+        if i >= order.size():
+            b.visible = false
+            continue
+        var st: Node3D = _station_by_id(order[i])
+        b.visible = true
+        b.position = Vector2(18, 180 + i * 72)
+        b.disabled = false
+        var m := int(mastery(current_location_id, st.def.id))
+        var st_title := _st_title(current_location_id, st.def)
+        if st.is_broken():
+            b.text = "%s · %s" % [st_title, Lang.t("train_broken")]
+            b.add_theme_color_override("font_color", Color(0.92, 0.45, 0.38))
+        else:
+            b.text = "%s · %s %d · %s %d" % [st_title, Lang.t("train_mastery_short"), m,
+                    Lang.t("train_durability_short"), int(round(st.durability))]
+            var lit: bool = i == sel or order[i] == _nearest_id
+            b.add_theme_color_override("font_color",
+                    Color(0.98, 0.86, 0.45) if lit else Color(0.90, 0.92, 0.98))
+    _update_overlay()
+
+
+func _update_overlay() -> void:
+    if not active or ui == null:
+        return
+    var show := false
+    var title := ""
+    var hint := ""
+    var l1 := ""
+    var l2 := ""
+    if repair_on:
+        show = true
+        title = Lang.t("train_repair_title")
+        hint = Lang.t("train_repair_hint")
+        if repair_prompt_open():
+            l1 = Lang.t("train_press_now")
+            l2 = "окно %.2f с" % REPAIR_WINDOW
+        else:
+            l1 = Lang.t("train_wait_prompt")
+            l2 = ""
+    elif result_open:
+        show = true
+        var ok := bool(last_result.get("ok", false))
+        title = Lang.t("train_done") if ok else Lang.t("train_fail")
+        var gain: Dictionary = last_result.get("gain", {})
+        if bool(last_result.get("repair", false)):
+            title = Lang.t("train_repaired")
+            l1 = "%s %d" % [Lang.t("train_durability_word"),
+                    int(round(float(last_result.get("durability", 0.0))))]
+        else:
+            l1 = "%s %d / %s %d" % [Lang.t("train_reps"), int(last_result.get("reps", 0)),
+                    Lang.t("train_mistakes"), int(last_result.get("mistakes", 0))]
+        l2 = _gain_text(gain)
+        hint = Lang.t("train_continue")
+    elif station != null and station.active:
+        show = true
+        title = _st_title(current_location_id, station.def)
+        var kind: int = station.kind()
+        if kind == StationDef.Kind.BAG:
+            hint = Lang.t("train_bag_hint")
+            l1 = "%s %d" % [Lang.t("train_reps"), station.reps_done]
+        elif kind == StationDef.Kind.HOLD:
+            hint = Lang.t("train_hold_hint")
+            l1 = "%d%%" % int(round(station.hold_progress() * 100.0))
+            l2 = "%s %d / %d" % [Lang.t("train_reps"), station.reps_done, int(station.def.reps)]
+        else:
+            hint = Lang.t("train_qte_hint") if kind == StationDef.Kind.QTE \
+                    else Lang.t("train_rhythm_hint")
+            l1 = "%s %d / %d" % [Lang.t("train_reps"), station.reps_done, int(station.def.reps)]
+            if station.prompt_open():
+                l2 = Lang.t("train_press_now") + " (%.2f)" % station.prompt_left()
+            else:
+                l2 = Lang.t("train_wait_prompt")
+    _overlay.visible = show
+    if not show:
+        return
+    _ov_title.text = title
+    _ov_hint.text = hint
+    _ov_line1.text = l1
+    _ov_line2.text = l2
+
+
+func _update_ui() -> void:
+    if screen == "hub":
+        _render_hub()
+    else:
+        _render_location()
+
+
+## Обновить подсказку «рядом станция» и подсветку (зовётся из tick).
+func _refresh_near_hint() -> void:
+    if screen != "loc" or ui == null:
+        return
+    if _nearest_id != "":
+        var st: Node3D = _station_by_id(_nearest_id)
+        if st != null:
+            _status.text = Lang.t("train_near") % _st_title(current_location_id, st.def)
+    else:
+        _status.text = ""
+
+
+func _bonus_text(loc: TrainingLocationDef) -> String:
+    var parts: Array[String] = []
+    for k in loc.stat_bonus:
+        parts.append("%s ×%.1f" % [_stat_name(String(k)), float(loc.stat_bonus[k])])
+    return ", ".join(parts)
+
+
+func _gain_text(gain: Dictionary) -> String:
+    if gain.is_empty():
+        return ""
+    var parts: Array[String] = []
+    for k in gain:
+        parts.append("+%.2f %s" % [float(gain[k]), _stat_name(String(k))])
+    return ", ".join(parts)
+
+
+func _stat_name(stat: String) -> String:
+    match stat:
+        "strength":
+            return Lang.t("stat_strength")
+        "stamina":
+            return Lang.t("stat_stamina")
+        "speed":
+            return Lang.t("stat_speed")
+    return stat
+
+
+func _play(key: String) -> void:
+    if main != null and main.get("sfx") != null:
+        (main.sfx as Node).play(key, randf_range(0.95, 1.05), -12.0)

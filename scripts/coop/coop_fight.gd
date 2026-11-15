@@ -2305,7 +2305,7 @@ func _on_server_lost() -> void:
 func handle_key(event: InputEvent) -> String:
     if not (event is InputEventKey) or not event.pressed or event.echo:
         return ""
-    if event.keycode == KEY_ESCAPE:
+    if event.physical_keycode == KEY_ESCAPE:
         if state == MatchState.RESULT:
             return "lobby"
         return "leave"

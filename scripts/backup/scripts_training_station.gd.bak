@@ -1,0 +1,286 @@
+class_name TrainingStation
+extends Node3D
+## Одна переиспользуемая станция тренировки (эквивалент station_*.tscn, но
+## собран процедурно — в проекте нет сцен). Визуал: тумба + Label3D + Area3D
+## (задел под подход «подойди и нажми E»), поведение выбирается по StationDef.kind.
+## Логику прироста статов/износа/мастерства ведёт TrainingMode: станция только
+## сообщает об успешных повторах.
+
+var def: StationDef
+var location: TrainingLocationDef
+var mode
+
+var durability := 100.0
+var durability_max := 100.0
+
+var active := false
+var finished := false
+var ok := false
+var reps_done := 0
+var mistakes := 0
+## накопленный прирост статов за подход (уже с бонусом локации)
+var gain: Dictionary = {}
+
+var t := 0.0
+var _cool := 0.0
+var _prompt_t := -1.0
+var _next_prompt := 0.0
+var _holding := false
+var _hold_t := 0.0
+var _label: Label3D
+var _ring: MeshInstance3D
+
+
+## Подсветка ближайшей станции: кольцо на полу + яркая подпись.
+func set_highlight(on: bool) -> void:
+    if _ring != null:
+        _ring.visible = on
+    if _label != null:
+        _label.modulate = Color(1.0, 1.0, 0.62) if on else Color(1.0, 0.94, 0.78)
+
+
+## Перевести подпись станции (EN/RU при смене языка).
+func set_label_text(t: String) -> void:
+    if _label != null:
+        _label.text = t
+
+
+func setup(st: StationDef, loc: TrainingLocationDef, m) -> void:
+    def = st
+    location = loc
+    mode = m
+    name = "Station_" + st.id
+    _build_visual()
+    update_label()
+
+
+func _build_visual() -> void:
+    var body := MeshInstance3D.new()
+    var bm := BoxMesh.new()
+    bm.size = Vector3(1.25, 0.9, 1.25)
+    body.mesh = bm
+    var mat := StandardMaterial3D.new()
+    mat.albedo_color = _kind_color()
+    mat.roughness = 0.85
+    mat.metallic = 0.05
+    # мягкое самосвечение: в тёмном зале/подвале сцена читается и без ярких ламп
+    mat.emission_enabled = true
+    mat.emission = _kind_color() * 0.45
+    body.material_override = mat
+    body.position = Vector3(0.0, 0.45, 0.0)
+    add_child(body)
+    # верхняя площадка-«блин» — чтобы станция читалась как снаряд
+    var top := MeshInstance3D.new()
+    var tm := CylinderMesh.new()
+    tm.top_radius = 0.42
+    tm.bottom_radius = 0.42
+    tm.height = 0.12
+    top.mesh = tm
+    var tmat := StandardMaterial3D.new()
+    tmat.albedo_color = _kind_color().lightened(0.18)
+    tmat.roughness = 0.7
+    tmat.emission_enabled = true
+    tmat.emission = _kind_color().lightened(0.18) * 0.5
+    top.material_override = tmat
+    top.position = Vector3(0.0, 0.96, 0.0)
+    add_child(top)
+    # кольцо подсветки: показывается, когда игрок подошёл ближе всех
+    _ring = MeshInstance3D.new()
+    var rm := TorusMesh.new()
+    rm.inner_radius = 0.78
+    rm.outer_radius = 0.98
+    rm.rings = 24
+    rm.ring_segments = 8
+    _ring.mesh = rm
+    var rmat := StandardMaterial3D.new()
+    rmat.albedo_color = Color(0.98, 0.86, 0.45)
+    rmat.emission_enabled = true
+    rmat.emission = Color(0.98, 0.82, 0.35)
+    rmat.emission_energy_multiplier = 1.6
+    rmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+    _ring.material_override = rmat
+    _ring.position = Vector3(0.0, 0.03, 0.0)
+    _ring.visible = false
+    add_child(_ring)
+    _label = Label3D.new()
+    _label.text = String(def.title)
+    _label.font_size = 44
+    _label.pixel_size = 0.004
+    _label.position = Vector3(0.0, 1.55, 0.0)
+    _label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+    _label.modulate = Color(1.0, 0.94, 0.78)
+    _label.outline_size = 8
+    _label.outline_modulate = Color(0.05, 0.05, 0.07, 0.9)
+    add_child(_label)
+    var area := Area3D.new()
+    area.name = "Area"
+    var cs := CollisionShape3D.new()
+    var shape := BoxShape3D.new()
+    shape.size = Vector3(1.7, 1.8, 1.7)
+    cs.shape = shape
+    cs.position = Vector3(0.0, 0.9, 0.0)
+    area.add_child(cs)
+    add_child(area)
+
+
+func _kind_color() -> Color:
+    match def.kind:
+        StationDef.Kind.BAG:
+            return Color(0.42, 0.24, 0.20)
+        StationDef.Kind.QTE:
+            return Color(0.24, 0.30, 0.42)
+        StationDef.Kind.RHYTHM:
+            return Color(0.24, 0.40, 0.30)
+        StationDef.Kind.HOLD:
+            return Color(0.40, 0.26, 0.42)
+    return Color(0.30, 0.30, 0.30)
+
+
+## Подпись станции на сцене: только название, чтобы подписи не наезжали.
+## Мастерство и прочность видны в списке станций слева.
+func update_label() -> void:
+    if _label == null:
+        return
+    _label.text = String(def.title)
+
+
+func kind() -> StationDef.Kind:
+    return def.kind
+
+
+func is_broken() -> bool:
+    return durability <= 0.0
+
+
+## Начать подход. false — станция сломана или уже идёт подход.
+func begin() -> bool:
+    if active or is_broken():
+        return false
+    active = true
+    finished = false
+    ok = false
+    reps_done = 0
+    mistakes = 0
+    gain = {}
+    t = 0.0
+    _cool = 0.0
+    _prompt_t = -1.0
+    _next_prompt = minf(0.35, float(def.interval))
+    _holding = false
+    _hold_t = 0.0
+    return true
+
+
+## Нажатие действия (E/Space). Возвращает "hit"/"miss"/"start"/"ignored".
+func press() -> String:
+    if not active:
+        return "ignored"
+    match def.kind:
+        StationDef.Kind.BAG:
+            if _cool > 0.0:
+                return "ignored"
+            _cool = float(def.cooldown)
+            _success()
+            return "hit"
+        StationDef.Kind.HOLD:
+            if _holding:
+                return "ignored"
+            _holding = true
+            _hold_t = 0.0
+            return "start"
+        _:
+            if _prompt_t >= 0.0 and _prompt_t <= float(def.perfect_window):
+                _prompt_t = -1.0
+                _success()
+                return "hit"
+            return _miss()
+    return "ignored"
+
+
+## Покадровое обновление: таймеры подсказок, удержание, кулдаун.
+func tick(delta: float, held: bool) -> void:
+    if not active:
+        return
+    t += delta
+    _cool = maxf(0.0, _cool - delta)
+    if def.kind == StationDef.Kind.BAG:
+        return
+    if def.kind == StationDef.Kind.HOLD:
+        if _holding:
+            if held:
+                _hold_t += delta
+                if _hold_t >= float(def.hold_time):
+                    _holding = false
+                    _hold_t = 0.0
+                    _success()
+            else:
+                _holding = false
+                _hold_t = 0.0
+                _miss()
+        return
+    # QTE / ритм: подсказки идут с интервалом, окно — perfect_window
+    if _prompt_t >= 0.0:
+        _prompt_t += delta
+        if _prompt_t > float(def.perfect_window):
+            _prompt_t = -1.0
+            _miss()
+    _next_prompt -= delta
+    if _next_prompt <= 0.0:
+        _prompt_t = 0.0
+        _next_prompt = maxf(0.2, float(def.interval))
+
+
+## Подсказка открыта (для UI и тестов).
+func prompt_open() -> bool:
+    return active and _prompt_t >= 0.0
+
+
+func prompt_left() -> float:
+    if _prompt_t < 0.0:
+        return 0.0
+    return maxf(0.0, float(def.perfect_window) - _prompt_t)
+
+
+func hold_progress() -> float:
+    if not _holding:
+        return 0.0
+    return clampf(_hold_t / maxf(0.01, float(def.hold_time)), 0.0, 1.0)
+
+
+func _success() -> void:
+    reps_done += 1
+    if mode != null:
+        mode.station_gain(self)
+        mode.consume_wear(self)
+    if float(def.reps) > 0.0 and reps_done >= int(def.reps):
+        _finish(true)
+
+
+func _miss() -> String:
+    mistakes += 1
+    if mode != null:
+        mode.play_fail(self)
+    if mistakes > int(def.mistakes_allowed):
+        _finish(false)
+    return "miss"
+
+
+func _finish(win: bool) -> void:
+    if finished:
+        return
+    active = false
+    finished = true
+    ok = win
+    if mode != null:
+        mode.on_station_finished(self)
+
+
+## Принудительно закончить подход (Esc): результат не засчитывается.
+func abort() -> void:
+    if not active:
+        return
+    active = false
+    finished = true
+    ok = false
+    if mode != null:
+        mode.on_station_finished(self)

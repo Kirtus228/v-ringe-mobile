@@ -1,0 +1,356 @@
+extends Node3D
+## Арена: настил ринга, канаты, столбы, ступенчатые трибуны с толпой.
+##
+## Оптимизация (Этап 6): статика больше не создаётся как сотни MeshInstance3D —
+## ступени/настил/столбы склеены в MultiMeshInstance3D по материалу, канаты
+## (168 сегментов) сведены в 3 MultiMesh (по уровню), толпа — как была, 2 MultiMesh.
+## Внешний вид и поведение (прогиб канатов rope_hit) сохранены: у каждого сегмента
+## каната своя per-instance transform, обновляемая при колебании.
+
+const RING_HALF := 3.5
+const ROPE_SEGS := 14
+const ROPE_LEVELS := [0.62, 1.0, 1.38]
+
+var crowd_meshes: Array = []
+var ropes: Array = []          # сегменты канатов: base/size/axis/off/vel
+var _energy := 0.0
+var _time := 0.0
+var _box_batches := {}
+var _cyl_batches := {}
+var _rope_meshes: Array = []
+## v48: меши канатов пересобираются только когда канаты реально колеблются
+var _rope_dirty := false
+
+
+func build() -> void:
+    _floor()
+    _ring()
+    _stands()
+    _commit_batches()
+
+
+func _mat(c: Color, rough: float = 0.8, metallic: float = 0.0) -> StandardMaterial3D:
+    var m := StandardMaterial3D.new()
+    m.albedo_color = c
+    m.roughness = rough
+    m.metallic = metallic
+    return m
+
+
+## Добавить бокс в батч материала (позиция/размер; склейка при _commit_batches).
+func _box(size: Vector3, pos: Vector3, mat: Material) -> void:
+    if mat == null:
+        return
+    var key := mat.get_instance_id()
+    if not _box_batches.has(key):
+        _box_batches[key] = {"mat": mat, "items": []}
+    _box_batches[key]["items"].append({"size": size, "pos": pos})
+
+
+## Добавить цилиндр в батч материала.
+func _cyl(radius: float, height: float, pos: Vector3, mat: Material) -> void:
+    if mat == null:
+        return
+    var key := mat.get_instance_id()
+    if not _cyl_batches.has(key):
+        _cyl_batches[key] = {"mat": mat, "items": []}
+    _cyl_batches[key]["items"].append({"r": radius, "h": height, "pos": pos})
+
+
+## Склейка собранного в один ArrayMesh на материал (один draw на материал).
+## v48: раньше здесь был MultiMeshInstance3D, но на телефоне заказчика MultiMesh
+## не рисовался — статику склеиваем обычным мешем, он виден на любом GPU.
+func _commit_batches() -> void:
+    for key in _box_batches:
+        var b: Dictionary = _box_batches[key]
+        _add_merged_boxes(b["items"], b["mat"])
+    for key in _cyl_batches:
+        var b: Dictionary = _cyl_batches[key]
+        _add_merged_cyls(b["items"], b["mat"])
+    _box_batches.clear()
+    _cyl_batches.clear()
+
+
+## Все боксы батча — в один меш (размеры/позиции через scale/transform).
+func _add_merged_boxes(items: Array, mat: Material) -> MeshInstance3D:
+    if items.is_empty():
+        return null
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
+    var unit := BoxMesh.new()
+    unit.size = Vector3.ONE
+    for it in items:
+        st.append_from(unit, 0, Transform3D(Basis.from_scale(it["size"]), it["pos"]))
+    return _add_merged(st, mat)
+
+
+## Все цилиндры батча — в один меш.
+func _add_merged_cyls(items: Array, mat: Material) -> MeshInstance3D:
+    if items.is_empty():
+        return null
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
+    var unit := CylinderMesh.new()
+    unit.top_radius = 0.5
+    unit.bottom_radius = 0.5
+    unit.height = 1.0
+    for it in items:
+        var r := float(it["r"])
+        st.append_from(unit, 0, Transform3D(
+                Basis.from_scale(Vector3(r * 2.0, float(it["h"]), r * 2.0)), it["pos"]))
+    return _add_merged(st, mat)
+
+
+func _add_merged(st: SurfaceTool, mat: Material) -> MeshInstance3D:
+    var mesh := st.commit()
+    if mesh == null or mesh.get_surface_count() == 0:
+        return null
+    var mi := MeshInstance3D.new()
+    mi.mesh = mesh
+    mi.material_override = mat
+    add_child(mi)
+    return mi
+
+
+## Склеенный меш канатов одного уровня из текущих позиций сегментов.
+func _build_rope_mesh(level_idx: int) -> void:
+    var items: Array = []
+    for r in ropes:
+        if int(r["level"]) != level_idx:
+            continue
+        items.append({"size": r["size"], "pos": (r["base"] as Vector3) + (r["off"] as Vector3)})
+    var level: float = float(ROPE_LEVELS[level_idx])
+    var mat := _mat(Color(0.6, 0.13, 0.17), 0.5, 0.15)
+    var mi: MeshInstance3D = null
+    if _rope_meshes.size() > level_idx and _rope_meshes[level_idx] != null:
+        mi = _rope_meshes[level_idx]
+        var old := mi.get_parent()
+        old.remove_child(mi)
+        mi.queue_free()
+        _rope_meshes[level_idx] = null
+    var new_mi := _add_merged_boxes(items, mat)
+    if new_mi != null:
+        new_mi.name = "RopeLevel%d" % level_idx
+        new_mi.custom_aabb = AABB(Vector3(-6.0, -2.0, -6.0), Vector3(12.0, 6.0, 12.0))
+    if _rope_meshes.size() > level_idx:
+        _rope_meshes[level_idx] = new_mi
+    else:
+        _rope_meshes.append(new_mi)
+
+
+func _add_mm(mm: MultiMesh, mat: Material) -> MultiMeshInstance3D:
+    var mmi := MultiMeshInstance3D.new()
+    mmi.multimesh = mm
+    mmi.material_override = mat
+    mmi.custom_aabb = AABB(Vector3(-30.0, -5.0, -30.0), Vector3(60.0, 30.0, 60.0))
+    add_child(mmi)
+    return mmi
+
+
+func _floor() -> void:
+    # пол зала
+    _box(Vector3(46, 0.3, 46), Vector3(0, -1.30, 0), _mat(Color(0.03, 0.035, 0.05), 0.96))
+    # помост ринга
+    _box(Vector3(9.4, 0.4, 9.4), Vector3(0, -0.36, 0), _mat(Color(0.07, 0.08, 0.11), 0.9))
+    # красный фартук по краю помоста
+    var skirt := _mat(Color(0.28, 0.05, 0.08), 0.75)
+    _box(Vector3(9.4, 0.55, 0.12), Vector3(0, -0.2, 4.7), skirt)
+    _box(Vector3(9.4, 0.55, 0.12), Vector3(0, -0.2, -4.7), skirt)
+    _box(Vector3(0.12, 0.55, 9.4), Vector3(4.7, -0.2, 0), skirt)
+    _box(Vector3(0.12, 0.55, 9.4), Vector3(-4.7, -0.2, 0), skirt)
+    # настил
+    _box(Vector3(7.2, 0.12, 7.2), Vector3(0, -0.08, 0), _mat(Color(0.11, 0.13, 0.18), 0.88))
+    # тёмная окантовка и логотип
+    _box(Vector3(2.6, 0.02, 2.6), Vector3(0, -0.01, 0), _mat(Color(0.16, 0.21, 0.3), 0.75))
+    _box(Vector3(2.2, 0.02, 2.2), Vector3(0, 0.0, 0), _mat(Color(0.1, 0.13, 0.19), 0.75))
+
+    # физический пол: по нему падает ragdoll
+    var floor_body := StaticBody3D.new()
+    floor_body.name = "RingFloor"
+    var fshape := CollisionShape3D.new()
+    var fbox := BoxShape3D.new()
+    fbox.size = Vector3(9.4, 0.5, 9.4)
+    fshape.shape = fbox
+    floor_body.add_child(fshape)
+    floor_body.position = Vector3(0, -0.27, 0)
+    add_child(floor_body)
+
+    # пол зала ниже ринга на 1.15 м: тело, вылетевшее за канаты, реально падает
+    var hall := StaticBody3D.new()
+    hall.name = "HallFloor"
+    var hshape := CollisionShape3D.new()
+    var hbox := BoxShape3D.new()
+    hbox.size = Vector3(46, 0.3, 46)
+    hshape.shape = hbox
+    hall.add_child(hshape)
+    hall.position = Vector3(0, -1.30, 0)
+    add_child(hall)
+
+
+func _ring() -> void:
+    var post_mat := _mat(Color(0.14, 0.16, 0.21), 0.4, 0.6)
+    var pad_mat := _mat(Color(0.5, 0.1, 0.14), 0.6)
+    var rope_mat := _mat(Color(0.6, 0.13, 0.17), 0.5, 0.15)
+    var cap_mat := _mat(Color(0.95, 0.75, 0.25), 0.3, 0.5)
+
+    var h := RING_HALF
+    for c in [Vector3(-h, 0, -h), Vector3(h, 0, -h), Vector3(-h, 0, h), Vector3(h, 0, h)]:
+        _cyl(0.11, 1.45, c + Vector3(0, 0.72, 0), post_mat)
+        _cyl(0.18, 0.1, c + Vector3(0, 1.47, 0), cap_mat)
+        _cyl(0.22, 0.34, c + Vector3(0, 0.3, 0), pad_mat)
+
+    # канаты — сегменты: тело влетает, канат прогибается и пружиной возвращается
+    # (rope_hit + _animate_ropes). v48: один склеенный меш на уровень (обычный
+    # MeshInstance3D, не MultiMesh — на телефоне MultiMesh не рисовался).
+    var segs := ROPE_SEGS
+    var sl := 2.0 * h / float(segs)
+    for li in ROPE_LEVELS.size():
+        var level := float(ROPE_LEVELS[li])
+        for side in 4:
+            var along_x := side < 2
+            var sgn := -1.0 if side % 2 == 0 else 1.0
+            for i in segs:
+                var t := -h + sl * (float(i) + 0.5)
+                var pos := Vector3.ZERO
+                var size := Vector3.ZERO
+                var axis := Vector3.ZERO
+                if along_x:
+                    pos = Vector3(t, level, h * sgn)
+                    size = Vector3(sl + 0.02, 0.032, 0.032)
+                    axis = Vector3(1, 0, 0)
+                else:
+                    pos = Vector3(h * sgn, level, t)
+                    size = Vector3(0.032, 0.032, sl + 0.02)
+                    axis = Vector3(0, 0, 1)
+                ropes.append({"level": li, "base": pos, "size": size,
+                        "axis": axis, "off": Vector3.ZERO, "vel": Vector3.ZERO})
+    for li in ROPE_LEVELS.size():
+        _build_rope_mesh(li)
+
+
+## Канаты прогибаются от влетевшего тела и пружиной возвращаются назад.
+func rope_hit(at: Vector3, dir: Vector3, power: float) -> void:
+    var d := Vector3(dir.x, 0.0, dir.z)
+    if d.length() < 0.01:
+        d = Vector3(0, 0, 1)
+    d = d.normalized()
+    for r in ropes:
+        var base: Vector3 = r["base"]
+        var dd: float = Vector2(base.x - at.x, base.z - at.z).length()
+        if dd > 1.45:
+            continue
+        var u := 1.0 - dd / 1.45
+        var f := u * u * clampf(power, 0.0, 2.5) * 0.24
+        var off: Vector3 = r["off"] + d * f
+        r["off"] = off.limit_length(0.30)
+        r["vel"] = (r["vel"] as Vector3) + d * f * 9.0
+
+
+func _animate_ropes(dt: float) -> void:
+    for r in ropes:
+        var off: Vector3 = r["off"]
+        var vel: Vector3 = r["vel"]
+        if off.length() < 0.0004 and vel.length() < 0.002:
+            continue
+        vel += (-off * 205.0 - vel * 10.5) * dt
+        off += vel * dt
+        if off.length() < 0.0004:
+            off = Vector3.ZERO
+            vel = Vector3.ZERO
+        r["off"] = off
+        r["vel"] = vel
+        _rope_dirty = true
+    # v48: меш канатов пересобираем только когда они реально двигаются
+    if _rope_dirty:
+        for li in ROPE_LEVELS.size():
+            _build_rope_mesh(li)
+        _rope_dirty = false
+
+
+func _stands() -> void:
+    var step_mat := _mat(Color(0.055, 0.06, 0.08), 0.95)
+    var body_mat := _mat(Color(0.1, 0.11, 0.14), 0.95)
+    var head_mat := _mat(Color(0.17, 0.18, 0.22), 0.9)
+
+    var bodies := PackedVector3Array()
+    var heads := PackedVector3Array()
+    var rnd := RandomNumberGenerator.new()
+    rnd.seed = 20261109
+
+    # четыре трибуны, каждая — ступени по 0.55 м и публика на них
+    for row in 4:
+        var dist := 6.3 + float(row) * 1.25
+        var y := -0.35 + float(row) * 0.55
+        for side in 4:
+            var horizontal := side < 2
+            var sign_z := 1.0 if side == 0 else -1.0
+            var sign_x := 1.0 if side == 2 else -1.0
+            # ступень (в батч: 16 боксов → один MultiMesh)
+            if horizontal:
+                _box(Vector3(34, 0.55, 1.25), Vector3(0, y - 0.28, dist * sign_z), step_mat)
+            else:
+                _box(Vector3(1.25, 0.55, 34), Vector3(dist * sign_x, y - 0.28, 0), step_mat)
+            # люди
+            var n := 16
+            for i in n:
+                var off := -7.5 + float(i) * 1.0 + rnd.randf_range(-0.25, 0.25)
+                var jitter := rnd.randf_range(-0.25, 0.25)
+                var pos := Vector3.ZERO
+                if horizontal:
+                    pos = Vector3(off, y + 0.1, dist * sign_z + jitter)
+                else:
+                    pos = Vector3(dist * sign_x + jitter, y + 0.1, off)
+                if absf(pos.x) < 5.2 and absf(pos.z) < 5.2:
+                    continue
+                bodies.append(pos + Vector3(0, 0.28, 0))
+                heads.append(pos + Vector3(0, 0.72, 0))
+
+    _multimesh(bodies, Vector3(0.5, 0.62, 0.42), body_mat)
+    _multimesh(heads, Vector3(0.26, 0.26, 0.26), head_mat)
+
+
+func _multimesh(points: PackedVector3Array, size: Vector3, mat: Material) -> MultiMeshInstance3D:
+    if points.is_empty():
+        return null
+    var mesh := BoxMesh.new()
+    mesh.size = size
+    var mm := MultiMesh.new()
+    mm.transform_format = MultiMesh.TRANSFORM_3D
+    mm.mesh = mesh
+    mm.instance_count = points.size()
+    var basis := Basis.from_scale(Vector3.ONE)
+    var phases := PackedFloat32Array()
+    var rnd := RandomNumberGenerator.new()
+    rnd.seed = 4242 + points.size()
+    for i in points.size():
+        mm.set_instance_transform(i, Transform3D(basis, points[i]))
+        phases.append(rnd.randf_range(0.0, TAU))
+    var mmi := _add_mm(mm, mat)
+    mmi.custom_aabb = AABB(Vector3(-18.0, -3.0, -18.0), Vector3(36.0, 12.0, 36.0))
+    crowd_meshes.append({"mm": mm, "base": points, "phase": phases})
+    return mmi
+
+
+# ------------------------------------------------------------------ реакция толпы
+
+func pulse(power: float) -> void:
+    _energy = maxf(_energy, clampf(power, 0.0, 1.0))
+
+
+func _process(delta: float) -> void:
+    _time += delta
+    _animate_ropes(delta)
+    if _energy <= 0.002:
+        return
+    _energy = maxf(0.0, _energy - delta * 0.55)
+    var basis := Basis.from_scale(Vector3.ONE)
+    for entry in crowd_meshes:
+        var mm: MultiMesh = entry["mm"]
+        var base: PackedVector3Array = entry["base"]
+        var phase: PackedFloat32Array = entry["phase"]
+        var n := base.size()
+        for i in n:
+            var bounce := sin(_time * 9.0 + phase[i]) * 0.26 * _energy
+            var sway_x := sin(_time * 5.0 + phase[i] * 1.7) * 0.06 * _energy
+            var offset := Vector3(sway_x, maxf(bounce, 0.0), 0.0)
+            mm.set_instance_transform(i, Transform3D(basis, base[i] + offset))

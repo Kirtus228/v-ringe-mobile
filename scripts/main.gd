@@ -648,6 +648,10 @@ var blood_fx: Node3D
 ## v71s: менеджер рекламы (создаётся в _ready, не автолоад — на web SDK грузится
 ## со страницы и может не подняться, игра от этого не зависит).
 var ads: Node = null
+## v71s: звук заглушён из-за потери фокуса окна (Яндекс Игры, п. 1.3).
+var _focus_muted := false
+## v71s: язык выбирается автоматически (по SDK/локали), пока игрок не выбрал сам.
+var lang_auto := true
 var blood_level := 0
 var blood_test := false
 ## T8: замер урона по 10 ударам (headless, только по флагу --damagetest).
@@ -777,7 +781,35 @@ var gfx_info := ""
 
 
 ## Крестик окна: успеть сохранить профиль до выхода.
+## Перед разрушением дерева глушим музыку/звуки: иначе AudioServer держит
+## playback и Godot печатает утечки при quit (2 ObjectDB + 1 resource).
+func _exit_tree() -> void:
+    if sfx != null and sfx.has_method("shutdown"):
+        sfx.shutdown()
+
+
 func _notification(what: int) -> void:
+    # v71s (Яндекс Игры, п. 1.3): при потере фокуса окна/вкладки звук игры
+    # останавливается, при возврате — включается. Глушим мастер-шину, настройки
+    # громкости при этом не теряются.
+    if what == NOTIFICATION_APPLICATION_FOCUS_OUT \
+            or what == NOTIFICATION_WM_WINDOW_FOCUS_OUT:
+        if _focus_muted == false:
+            _focus_muted = true
+            var mi := AudioServer.get_bus_index("Master")
+            if mi >= 0:
+                AudioServer.set_bus_mute(mi, true)
+        if sfx != null and sfx.has_method("music_pause"):
+            sfx.music_pause(true)
+    elif what == NOTIFICATION_APPLICATION_FOCUS_IN \
+            or what == NOTIFICATION_WM_WINDOW_FOCUS_IN:
+        if _focus_muted:
+            _focus_muted = false
+            var mi2 := AudioServer.get_bus_index("Master")
+            if mi2 >= 0 and (ads == null or not ads.is_page_muted()):
+                AudioServer.set_bus_mute(mi2, false)
+        if sfx != null and sfx.has_method("music_pause"):
+            sfx.music_pause(false)
     if what == NOTIFICATION_WM_CLOSE_REQUEST:
         _save_profile()
         _save_sound()
@@ -840,6 +872,8 @@ func _ready() -> void:
     _load_high_score()
     _load_sound()
     _load_profile()
+    # v71s: первый запуск на web — язык по локали браузера, дальше уточнит SDK.
+    _auto_lang_from_locale()
     _load_fight_stats()
     if belt_override >= 0:
         belt = clampi(belt_override, 0, BELTS.size() - 1)
@@ -868,7 +902,8 @@ func _ready() -> void:
     blood_fx = BloodFXScript.new()
     blood_fx.name = "BloodFX"
     add_child(blood_fx)
-    blood_fx.set_level(blood_level)
+    # v71t: на площадке кровь всегда OFF (_blood_eff), вне площадки — настройка
+    blood_fx.set_level(_blood_eff())
     # v71s: реклама — отдельный узел; на площадке с SDK показывает межстраничные
     # блоки, без площадки/аккаунта просто тихо ничего не делает.
     ads = AdsScript.new()
@@ -1546,11 +1581,17 @@ func _build_world() -> void:
     env.background_color = Color(0.017, 0.021, 0.033)
     env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
     env.ambient_light_color = Color(0.24, 0.3, 0.45)
-    env.ambient_light_energy = 0.55
+    env.ambient_light_energy = 0.40
     env.glow_enabled = true
-    env.glow_intensity = 0.45
+    env.glow_intensity = 0.26
     env.glow_bloom = 0.12
-    env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+    env.tonemap_mode = Environment.TONE_MAPPER_ACES
+    env.tonemap_exposure = 0.95
+    # v71b: общая коррекция яркости/контраста кадра — убирает «засвет» на светлых материалах
+    env.adjustment_enabled = true
+    env.adjustment_brightness = 0.96
+    env.adjustment_contrast = 1.08
+    env.adjustment_saturation = 1.06
     env.fog_enabled = true
     env.fog_light_color = Color(0.05, 0.07, 0.11)
     env.fog_density = 0.006
@@ -1573,7 +1614,7 @@ func _build_world() -> void:
         var spot := SpotLight3D.new()
         spot.position = Vector3(sx, 7.0, 2.2)
         spot.rotation_degrees = Vector3(-74, 0, 0)
-        spot.light_energy = 14.0
+        spot.light_energy = 7.0
         spot.spot_range = 20.0
         spot.spot_angle = 44.0
         spot.light_color = Color(0.86, 0.9, 1.0)
@@ -1583,7 +1624,7 @@ func _build_world() -> void:
     var top := SpotLight3D.new()
     top.position = Vector3(0, 8.5, 0.4)
     top.rotation_degrees = Vector3(-90, 0, 0)
-    top.light_energy = 11.0
+    top.light_energy = 4.2
     top.spot_range = 16.0
     top.spot_angle = 34.0
     top.light_color = Color(1.0, 0.96, 0.9)
@@ -2364,7 +2405,13 @@ func _menu_data() -> Dictionary:
             "tour_active": tour_id, "tour_wins": tour_wins,
             "tour_name": String(_tournament_by_id(tour_id).get("name", "")),
             "tour_done": tour_done.size(), "tour_total": TOURNAMENTS.size(),
-            "touch": touch_ui, "gfx": gfx_info, "net_ui": net_ui_allowed()}
+            "touch": touch_ui, "net_ui": net_ui_allowed(),
+            "hosted": _is_hosted(),
+            # v71t: п. 1.15 «следы разработки» — в веб-сборке не показываем
+            # строку «чем рендерится» (gl_compatibility · opengl3 · WebKit WebGL).
+            "gfx": "" if OS.has_feature("web") else gfx_info,
+            # v71t: п. 6.7 — в браузере кнопка «ВЫХОД» не нужна и ничего не делает.
+            "exit_ui": not OS.has_feature("web")}
 
 
 func _result_data() -> Dictionary:
@@ -2387,10 +2434,60 @@ func _howto_data() -> Dictionary:
 
 
 ## Кнопки HUD (мышь и геймпад).
+## v71s: внутри площадки Яндекс Игр внешние ссылки запрещены, поэтому
+## «ПОДДЕРЖАТЬ» -> boosty.to не открываем вообще (кнопку в меню тоже нет).
+func _is_hosted() -> bool:
+    if not OS.has_feature("web"):
+        return false
+    if ads != null:
+        return ads.is_hosted()
+    # Мир строится раньше узла AdsManager, а кровь надо выключить уже при сборке
+    # мира — поэтому на web читаем флаг страницы напрямую (его ставит
+    # yandex_bootstrap.js до старта движка).
+    return bool(JavaScriptBridge.eval("window.__vringeHosted === true", true))
+
+
+## v71t: внутри площадки кровь жёстко выключена — заявляем рейтинг 12+,
+## а декали «следы на поверхностях» для 12+ запрещены (п. 2.7 требований).
+## Вне площадки настройка работает как раньше.
+func _blood_locked() -> bool:
+    return _is_hosted()
+
+
+## Фактический уровень крови: настройка игрока, но внутри площадки всегда OFF.
+## Сохранённое значение не затираем — вернувшись на itch/десктоп игрок увидит
+## свою прежнюю настройку.
+func _blood_eff() -> int:
+    return 0 if _blood_locked() else blood_level
+
+
+func _open_support_link() -> void:
+    if _is_hosted():
+        return
+    const url := "https://boosty.to/gunter152"
+    if OS.has_feature("web"):
+        JavaScriptBridge.eval("window.open(%s, %s)" % [JSON.stringify(url), JSON.stringify("_blank")], true)
+    else:
+        OS.shell_open(url)
+
+
+## v71t: реклама на экране результата — ТОЛЬКО после действия игрока (п. 4.4):
+## показ запускается из нажатия «СЛЕД. БОЙ», а не автоматически в _end_fight.
+## Частотный кап и готовность провайдера проверяет AdsManager.
+func _result_ad_on_continue() -> void:
+    if ads != null:
+        ads.fight_end_slot()
+
+
 func _on_hud_button(id: String) -> void:
     match id:
         "play", "next":
-            if state == St.RESULT or state == St.MENU:
+            if state == St.RESULT:
+                # v71t: п. 4.4 — реклама только после действия игрока (нажал
+                # «СЛЕД. БОЙ»), а не сама на экране результата.
+                _result_ad_on_continue()
+                _start_career_fight()
+            elif state == St.MENU:
                 _start_career_fight()
         "tour":
             if state == St.MENU or state == St.RESULT:
@@ -2398,6 +2495,8 @@ func _on_hud_button(id: String) -> void:
         "tourstart":
             if state == St.TOUR:
                 _tour_start(tour_sel)
+        "support":
+            _open_support_link()
         "story":
             if state == St.MENU or state == St.RESULT:
                 _open_story()
@@ -2483,17 +2582,13 @@ func _on_hud_button(id: String) -> void:
         "storynext":
             _story_step(1)
         "gamerow0":
-            game_sel = 0
-            _game_activate()
+            _game_select_row(0)
         "gamerow1":
-            game_sel = 1
-            _game_activate()
+            _game_select_row(1)
         "gamerow2":
-            game_sel = 2
-            _game_activate()
+            _game_select_row(2)
         "gamerow3":
-            game_sel = 3
-            _game_activate()
+            _game_select_row(3)
         _:
             if id.begins_with("storych"):
                 _story_jump(int(id.substr(7)))
@@ -2677,6 +2772,9 @@ func _leave_to_menu() -> void:
     print("SAVE профиль сохранён: пояс=", belt + 1, " взято=", belt_wins, "/", BELT_FIGHTS,
             " монет=", coins, " форма=", form, " побед=", wins, " матчей=", matches)
     _reset_fight()
+    # v71t: вышли из боя/тренировки в меню — геймплей для площадки закончился.
+    if ads != null:
+        ads.gameplay_stop()
     _set_state(St.MENU)
 
 
@@ -2702,6 +2800,8 @@ func _apply_fullscreen() -> void:
 
 func _set_lang(code: String) -> void:
     lang_code = "en" if code == "en" else "ru"
+    # Игрок выбрал язык вручную — автоподбор от площадки больше не применяем.
+    lang_auto = false
     Lang.set_code(lang_code)
     _save_profile()
     if state == St.SETTINGS:
@@ -2712,6 +2812,75 @@ func _set_lang(code: String) -> void:
         hud.show_result(_result_data())
     elif state == St.HOWTO:
         hud.show_howto(_howto_data())
+
+
+## v71s: веб-сборка внутри Яндекс Игр. Два дела на кадр:
+##  1) сообщить платформе, что игра готова (LoadingAPI.ready, иначе «загрузка»
+##     у Яндекса висит — пункт 1.14 требований);
+##  2) подхватить язык из SDK (пункт 2.14), если игрок ещё не выбирал сам.
+var _web_ready_sent := false
+var _web_lang_applied := false
+var _web_boot_t := 0.0
+## v71s: признак площадки может появиться чуть позже меню (SDK инициализируется
+## асинхронно, а на самом Яндексе известен сразу по домену). Как только он
+## включился — перерисовываем меню без кнопки «ПОДДЕРЖАТЬ».
+var _hosted_ui_applied := false
+
+
+func _web_sdk_tick(delta: float) -> void:
+    if not OS.has_feature("web") or ads == null:
+        return
+    _web_boot_t += delta
+    # проверяем не дольше 15 с: на Яндексе признак известен сразу, вне площадки
+    # он не появится никогда — не дёргаем JS каждый кадр всю игру
+    if not _hosted_ui_applied and _web_boot_t < 15.0 and ads.is_hosted():
+        _hosted_ui_applied = true
+        print("WEB: площадка Яндекс Игр (", ads.hosted_reason(), ") — кнопка поддержки скрыта, кровь OFF")
+        # v71t: площадка/12+ — кровь принудительно OFF, даже если в сейве LIGHT/FULL
+        if blood_fx != null:
+            blood_fx.set_level(0)
+            blood_fx.clear()
+        if state == St.MENU:
+            hud.show_menu(_menu_data())
+        elif state == St.SETTINGS:
+            _refresh_settings()
+    if not _web_ready_sent and _web_boot_t > 1.0:
+        _web_ready_sent = true
+        ads.notify_game_ready()
+        if ads.sdk_error() != "":
+            print("WEB SDK: ", ads.sdk_error())
+    if not _web_lang_applied:
+        var sdk_lang: String = ads.sdk_lang()
+        if sdk_lang != "":
+            _web_lang_applied = true
+            if lang_auto and lang_override == "":
+                var want: String = "ru" if sdk_lang.begins_with("ru") else "en"
+                if want != lang_code:
+                    lang_code = want
+                    Lang.set_code(lang_code)
+                    print("WEB LANG автоподбор из SDK: ", sdk_lang, " -> ", lang_code)
+                    _save_profile()
+
+
+## Автоподбор языка на первом запуске, если площадка ещё не ответила:
+## берём язык браузера (ru → русский, иначе английский). Ручной выбор игрока
+## (lang_auto = false) не перебиваем.
+func _auto_lang_from_locale() -> void:
+    if not lang_auto or lang_override != "":
+        return
+    var loc: String = OS.get_locale_language().to_lower()
+    var want: String = "ru" if loc.begins_with("ru") else "en"
+    if want != lang_code and not cfg_has_lang():
+        lang_code = want
+        Lang.set_code(lang_code)
+
+
+## Был ли язык уже сохранён в профиле (тогда локаль не навязываем).
+func cfg_has_lang() -> bool:
+    var cfg := ConfigFile.new()
+    if cfg.load(_profile_path()) != OK:
+        return false
+    return cfg.has_section_key("p", "lang")
 
 # ---------------------------------------------------------------- состояние
 
@@ -2733,7 +2902,7 @@ func _reset_fight() -> void:
     # T8/T10: новый бой — кровь с пола убрать, счётчики ИИ обнулить
     if blood_fx != null:
         blood_fx.clear()
-        blood_fx.set_level(blood_level)
+        blood_fx.set_level(_blood_eff())
         if visual != null:
             blood_fx.set_quality_scale(visual.quality_particle_mult())
     fight_elapsed = 0.0
@@ -3067,6 +3236,9 @@ func _start_fight() -> void:
     hud.hide_overlay()
     sfx.play("bell", 1.0, -6.0)
     sfx.music_play(-13.0)
+    # v71t: разметка геймплея для площадки (п. 1.19.3) — бой начался.
+    if ads != null:
+        ads.gameplay_start()
 
 
 func _set_state(s: int) -> void:
@@ -3231,6 +3403,8 @@ func _apply_ring_visibility() -> void:
 
 func _process(delta: float) -> void:
     clock += delta
+    # v71s: веб/Яндекс Игры — автоподбор языка через SDK и сигнал «игра готова».
+    _web_sdk_tick(delta)
     # Этап 1: --renderinfo печатает бюджеты раз в секунду (без флага — один if)
     _renderinfo_tick(delta)
     cam_shake = maxf(0.0, cam_shake - delta * 26.0)
@@ -4190,7 +4364,7 @@ func _unhandled_input(event: InputEvent) -> void:
     if event is InputEventKey and event.pressed and not event.echo:
         # T1: экран «Статистика» — Esc/Enter/Space/K закрывают
         if state == St.STATS:
-            _stats_key(event.keycode)
+            _stats_key(event.physical_keycode)
             return
         # Этап 3: в тренировке весь ввод (навигация/Esc/станции) — модулю
         if state == St.TRAIN_HUB or state == St.TRAIN_LOC:
@@ -4198,36 +4372,36 @@ func _unhandled_input(event: InputEvent) -> void:
                 _on_training_nav(training_mode.handle_key(event))
             return
         if state == St.CUSTOM:
-            _locker_key(event.keycode)
+            _locker_key(event.physical_keycode)
             return
         if state == St.SETTINGS:
-            _settings_key(event.keycode)
+            _settings_key(event.physical_keycode)
             return
         if state == St.HOWTO:
-            _howto_key(event.keycode)
+            _howto_key(event.physical_keycode)
             return
         if state == St.PREFIGHT:
-            _prefight_key(event.keycode)
+            _prefight_key(event.physical_keycode)
             return
         if state == St.STORY:
-            _story_key(event.keycode)
+            _story_key(event.physical_keycode)
             return
         if state == St.TOUR:
-            _tour_key(event.keycode)
+            _tour_key(event.physical_keycode)
             return
         if state == St.UPGRADE:
-            _upgrade_key(event.keycode)
+            _upgrade_key(event.physical_keycode)
             return
         if state == St.REST:
             # перерыв: можно пропустить и сразу выйти на раунд
-            match event.keycode:
+            match event.physical_keycode:
                 KEY_ENTER, KEY_SPACE, KEY_R:
                     _next_round()
                 KEY_ESCAPE, KEY_P:
                     paused_from_rest = true
                     _set_state(St.PAUSE)
             return
-        match event.keycode:
+        match event.physical_keycode:
             KEY_ENTER, KEY_SPACE, KEY_R:
                 if state == St.MENU or state == St.RESULT:
                     _start_career_fight()
@@ -4438,7 +4612,7 @@ func _apply_input_map() -> void:
             InputMap.add_action(id)
         InputMap.action_erase_events(id)
         var ev := InputEventKey.new()
-        ev.keycode = int(keys[id])
+        ev.physical_keycode = int(keys[id])
         InputMap.action_add_event(id, ev)
     # корпусные удары: Ctrl + та же клавиша, что и обычный удар (из настроек).
     # exact_match при проверке не даст обычному нажатию сработать как корпусное.
@@ -4448,7 +4622,7 @@ func _apply_input_map() -> void:
             InputMap.add_action(bid)
         InputMap.action_erase_events(bid)
         var cev := InputEventKey.new()
-        cev.keycode = int(keys.get(base_id, 0))
+        cev.physical_keycode = int(keys.get(base_id, 0))
         cev.ctrl_pressed = true
         InputMap.action_add_event(bid, cev)
 
@@ -4471,7 +4645,7 @@ func _apply_input_map() -> void:
             InputMap.add_action(aid)
         InputMap.action_erase_events(aid)
         var iev := InputEventKey.new()
-        iev.keycode = int(spec[1])
+        iev.physical_keycode = int(spec[1])
         InputMap.action_add_event(aid, iev)
 
 
@@ -4614,7 +4788,8 @@ func _settings_data() -> Dictionary:
             "sound_sel": sound_sel, "rows": [], "sel": key_sel, "wait": key_wait,
             "msg": keys_msg, "msg_col": keys_msg_col,
             "lang": lang_code, "fullscreen": fullscreen, "game_sel": game_sel,
-            "blood": blood_level, "blood_text": blood_level_text(),
+            "blood": _blood_eff(), "blood_text": blood_level_text(),
+            "blood_locked": _blood_locked(), "game_rows": _game_rows(),
             "reset_armed": reset_armed > 0.0, "touch": touch_ui}
     if settings_tab == 0:
         var rows: Array = []
@@ -5547,11 +5722,12 @@ func _finalize() -> void:
             " пояс_взят=", belt_won, " чемпион=", champion, " турнир=", tour_id,
             " тур_бои=", tour_wins, " взято_турниров=", tour_done.size())
     _set_state(St.RESULT)
-    # v71s: монетизация — межстраничная реклама на экране результата боя
-    # (частотный кап внутри AdsManager; без провайдера просто ничего не делает).
+    # v71t: монетизация — на экране результата только копим счётчик боёв.
+    # Сам показ рекламы идёт по нажатию «СЛЕД. БОЙ» (_result_ad_on_continue),
+    # иначе модерация видит рекламу без действия игрока (п. 4.4).
     if ads != null:
         ads.note_fight_finished()
-        ads.fight_end_slot()
+        ads.gameplay_stop()
 ## Точка удара: голова цели.
 ## Точка прицела = поверхность головы со стороны атакующего, а не центр черепа.
 ## v71b: при прицеле в центр перчатка (радиус ~0.16) въезжала внутрь головы,
@@ -5859,6 +6035,7 @@ func _load_profile() -> void:
         belt_wins = clampi(int(cfg.get_value("p", "belt_wins", 0)), 0, BELT_FIGHTS)
         champion = bool(cfg.get_value("p", "champion", false))
         lang_code = "en" if String(cfg.get_value("p", "lang", "ru")) == "en" else "ru"
+        lang_auto = bool(cfg.get_value("p", "lang_auto", true))
         fullscreen = bool(cfg.get_value("p", "fullscreen", false))
         tour_id = String(cfg.get_value("p", "tour_id", ""))
         tour_wins = clampi(int(cfg.get_value("p", "tour_wins", 0)), 0, 3)
@@ -5926,6 +6103,7 @@ func _save_profile() -> void:
     cfg.set_value("p", "belt_wins", belt_wins)
     cfg.set_value("p", "champion", champion)
     cfg.set_value("p", "lang", lang_code)
+    cfg.set_value("p", "lang_auto", lang_auto)
     cfg.set_value("p", "fullscreen", fullscreen)
     cfg.set_value("p", "tour_id", tour_id)
     cfg.set_value("p", "tour_wins", tour_wins)
@@ -6313,6 +6491,19 @@ func _run_adstest() -> void:
     lines.append("кулдаун блокирует повтор=%s" % cool_ok)
     ok = ok and cool_ok
 
+    # 3b. v71t: п. 4.4 — реклама на экране результата только по действию игрока.
+    # _end_fight теперь зовёт лишь note_fight_finished(), а показ запускает
+    # _result_ad_on_continue() из нажатия «СЛЕД. БОЙ». Проверяем эту точку.
+    ads.fights_since_ad = AdsScript.AD_EVERY_FIGHTS
+    ads._cooldown = 0.0
+    var btn_tried0: int = ads.tried_count()
+    _result_ad_on_continue()
+    var btn_ok: bool = ads.tried_count() == btn_tried0 + 1
+    ads._cooldown = 0.0
+    ads.fights_since_ad = 0
+    lines.append("показ по кнопке на результате: попыток %d->%d" % [btn_tried0, ads.tried_count()])
+    ok = ok and btn_ok
+
     # 4. Отсутствие рекламы не ломает игру: состояние не меняется, меню строится
     var state_before: int = state
     ads.training_slot()
@@ -6326,6 +6517,9 @@ func _run_adstest() -> void:
     for l in lines:
         print("ADSTEST ", l)
     print("ADSTEST ок=", ok)
+    if sfx != null and sfx.has_method("shutdown"):
+        sfx.shutdown()
+        print("ADSTEST audio shutdown вызван")
     get_tree().quit()
 
 
@@ -7059,12 +7253,13 @@ func _sound_change(d: int) -> void:
 
 ## Вкладка «игра»: язык, полный экран, кровь, сброс прогресса.
 func _game_key(code: int) -> void:
+    var n: int = _game_rows().size()
     match code:
         KEY_UP:
-            game_sel = wrapi(game_sel - 1, 0, 4)
+            game_sel = wrapi(game_sel - 1, 0, n)
             _refresh_settings()
         KEY_DOWN:
-            game_sel = wrapi(game_sel + 1, 0, 4)
+            game_sel = wrapi(game_sel + 1, 0, n)
             _refresh_settings()
         KEY_LEFT, KEY_RIGHT, KEY_ENTER, KEY_SPACE:
             _game_activate()
@@ -7072,18 +7267,42 @@ func _game_key(code: int) -> void:
             _close_settings()
 
 
+## v71t: строки вкладки «игра». Внутри площадки строки «кровь» нет вообще
+## (кровь жёстко OFF, рейтинг 12+); вне площадки — как раньше, 4 строки.
+func _game_rows() -> Array:
+    var rows := [0, 1]
+    if not _blood_locked():
+        rows.append(2)
+    rows.append(3)
+    return rows
+
+
+## Тап по строке: HUD присылает id строки, а game_sel — индекс в _game_rows().
+func _game_select_row(row_id: int) -> void:
+    var idx: int = _game_rows().find(row_id)
+    if idx < 0:
+        return
+    game_sel = idx
+    _game_activate()
+
+
 ## Действие выбранной строки вкладки «игра» — и клавишей, и тапом.
 func _game_activate() -> void:
-    if game_sel == 0:
+    var rows := _game_rows()
+    var row_id: int = int(rows[clampi(game_sel, 0, rows.size() - 1)])
+    if row_id == 0:
         _set_lang("en" if lang_code == "ru" else "ru")
-    elif game_sel == 1:
+    elif row_id == 1:
         _toggle_fullscreen()
         _refresh_settings()
-    elif game_sel == 2:
-        # T3: кровь OFF → LIGHT → FULL → OFF; по умолчанию OFF
+    elif row_id == 2:
+        # T3: кровь OFF → LIGHT → FULL → OFF; по умолчанию OFF.
+        # v71t: внутри площадки строки нет, но на всякий случай не переключаем.
+        if _blood_locked():
+            return
         blood_level = (blood_level + 1) % 3
         if blood_fx != null:
-            blood_fx.set_level(blood_level)
+            blood_fx.set_level(_blood_eff())
             blood_fx.clear()
         _save_sound()
         _refresh_settings()
@@ -7091,11 +7310,12 @@ func _game_activate() -> void:
         _arm_reset()
 
 
-## Названия уровней крови для экрана настроек.
+## Названия уровней крови для экрана настроек (на площадке всегда «ВЫКЛ»).
 func blood_level_text() -> String:
-    if blood_level >= 2:
+    var lv: int = _blood_eff()
+    if lv >= 2:
         return String(Lang.t("blood_full"))
-    if blood_level == 1:
+    if lv == 1:
         return String(Lang.t("blood_light"))
     return String(Lang.t("blood_off"))
 
@@ -10397,6 +10617,10 @@ func _run_bloodtest() -> void:
     # 6) T3: настройка крови OFF/LIGHT/FULL сохраняется и читается заново
     if FileAccess.file_exists(_sound_path()):
         DirAccess.remove_absolute(ProjectSettings.globalize_path(_sound_path()))
+    # файла нет = первый запуск: сбрасываем значение в памяти, иначе _load_sound()
+    # при отсутствии файла оставляет то, что было загружено на старте, и тест
+    # зависит от предыдущего прогона
+    blood_level = 0
     _load_sound()
     var default_off: bool = blood_level == 0
     blood_level = 2
@@ -12701,7 +12925,7 @@ func _run_roundtest() -> void:
 
     # 3. перерыв пропускается Space (через тот же _unhandled_input)
     var ev := InputEventKey.new()
-    ev.keycode = KEY_SPACE
+    ev.physical_keycode = KEY_SPACE
     ev.pressed = true
     _unhandled_input(ev)
     var next_ok: bool = state == St.FIGHT and round_num == 2 \

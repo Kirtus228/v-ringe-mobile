@@ -125,6 +125,23 @@ func music_stop() -> void:
         music.stop()
 
 
+
+## Освободить аудио-плееры перед выходом: иначе AudioServer держит playback
+## и при quit остаются утечки (AudioStreamPlaybackWAV + AudioStreamWAV).
+func shutdown() -> void:
+    for p in players:
+        if p != null:
+            p.stop()
+            p.stream = null
+    if victory != null:
+        victory.stop()
+        victory.stream = null
+    if music != null:
+        music.stop()
+        music.stream = null
+    streams.clear()
+
+
 # ------------------------------------------------------------ победа (T10)
 
 ## Победная музыка: короткая процедурная фанфара (без файлов), плюс громче

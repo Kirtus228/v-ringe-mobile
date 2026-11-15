@@ -500,7 +500,7 @@ func debug_finish(won: bool) -> void:
 func handle_key(event: InputEvent) -> String:
     if not (event is InputEventKey) or not event.pressed or event.echo:
         return ""
-    var key := (event as InputEventKey).keycode
+    var key := (event as InputEventKey).physical_keycode
     if screen == "result":
         match key:
             KEY_ENTER, KEY_KP_ENTER, KEY_E:
@@ -762,7 +762,10 @@ func _clear_room() -> void:
 
 
 ## Короткая версия сборки («v55») из строки Lang.t("version").
+## v71v: на web не показываем версию — это «след разработки» (п. 1.15).
 func version_short() -> String:
+    if OS.has_feature("web"):
+        return ""
     var v := Lang.t("version")
     var n := v.get_slice_count("·")
     return v.get_slice("·", n - 1).strip_edges()
@@ -772,9 +775,11 @@ func hud_show_fight(def: ArenaDef) -> void:
     _fight_bar.visible = true
     # v55: версия в строке арены — доказательство со скриншота телефона, что бой
     # идёт на арене именно этой сборки (как «РЕКОРД … · vNN» в обычном бою).
-    _fight_label.text = "%s · сложность %d/5 · правил: %d · ставка: %d · %s" % [
+    # v71v: на web версии нет — не клеим пустой хвост.
+    var vtxt := version_short()
+    _fight_label.text = "%s · сложность %d/5 · правил: %d · ставка: %d%s" % [
             display_title(def), def.difficulty, def.rules_modifiers.size(), bet,
-            version_short()]
+            ("" if vtxt == "" else " · " + vtxt)]
     _surrender_btn.visible = true
 
 
